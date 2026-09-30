@@ -37,6 +37,7 @@
   kbd { font: 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text);
         background: var(--key-bg); border: 1px solid var(--key-line); border-bottom-width: 2px;
         border-radius: 5px; padding: 3px 6px; white-space: nowrap; }
+  kbd.unbound { color: var(--muted); border-style: dashed; }
   .note { color: var(--muted); font-size: 12px; margin: 18px 0 0; }
   button.link { font: inherit; font-size: 12px; color: var(--muted); background: none; border: 1px solid var(--line);
                 border-radius: 6px; padding: 4px 8px; cursor: pointer; }
@@ -76,26 +77,28 @@
     </div>
     <h3>Driving</h3>
     <dl>
-      <dt><kbd>A</kbd><kbd>D</kbd></dt><dd>Steer</dd>
-      <dt><kbd>Left click</kbd></dt><dd>Accelerate</dd>
-      <dt><kbd>Space</kbd></dt><dd>Brake / reverse</dd>
-      <dt><kbd>Right click</kbd></dt><dd>Drift, hop, trick</dd>
-      <dt><kbd>Shift</kbd></dt><dd>Use item</dd>
-      <dt><kbd>W</kbd><kbd>S</kbd></dt><dd>Aim item forward / back</dd>
-      <dt><kbd>Enter</kbd></dt><dd>Pause</dd>
+      <dt><kbd data-bind="axis1">A</kbd><kbd data-bind="axis0">D</kbd></dt><dd>Steer</dd>
+      <dt><kbd data-bind="a">Left click</kbd></dt><dd>Accelerate</dd>
+      <dt><kbd data-bind="b">Space</kbd></dt><dd>Brake / reverse</dd>
+      <dt><kbd data-bind="r">Right click</kbd></dt><dd>Drift, hop, trick</dd>
+      <dt><kbd data-bind="l">Shift</kbd></dt><dd>Use item</dd>
+      <dt><kbd data-bind="axis2">W</kbd><kbd data-bind="axis3">S</kbd></dt><dd>Aim item forward / back</dd>
+      <dt><kbd data-bind="start">Enter</kbd></dt><dd>Pause</dd>
     </dl>
     <h3>Menus</h3>
     <dl>
-      <dt><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></dt><dd>Move</dd>
-      <dt><kbd>Left click</kbd></dt><dd>Confirm (A)</dd>
-      <dt><kbd>Space</kbd></dt><dd>Back (B)</dd>
-      <dt><kbd>Arrows</kbd></dt><dd>D-pad</dd>
+      <dt><kbd data-bind="axis2">W</kbd><kbd data-bind="axis1">A</kbd><kbd data-bind="axis3">S</kbd><kbd data-bind="axis0">D</kbd></dt><dd>Move</dd>
+      <dt><kbd data-bind="a">Left click</kbd></dt><dd>Confirm (A)</dd>
+      <dt><kbd data-bind="b">Space</kbd></dt><dd>Back (B)</dd>
+      <dt><kbd data-bind="up">↑</kbd><kbd data-bind="left">←</kbd><kbd data-bind="down">↓</kbd><kbd data-bind="right">→</kbd></dt><dd>D-pad</dd>
     </dl>
     <h3>Game</h3>
     <dl>
       <dt><kbd>F10</kbd></dt><dd>Settings and key bindings</dd>
-      <dt><kbd>\</kbd></dt><dd>Mute / unmute</dd>
+      <dt><kbd data-bind="mute">\</kbd></dt><dd>Mute / unmute</dd>
     </dl>
+    <p class="note" id="keyboard-off" hidden>The keyboard is turned off for player 1: turn it on in
+      <kbd>F10</kbd> → Controller settings.</p>
     <p class="note">A game controller works too. On a Mac keyboard, press <kbd>fn</kbd>+<kbd>F10</kbd>.</p>
   </aside>
 </div>
@@ -177,6 +180,28 @@
   setControlsVisible(!controlsHidden);
   document.getElementById('hide-controls').addEventListener('click', () => { setControlsVisible(false); Module.canvas.focus(); });
   showControls.addEventListener('click', () => { setControlsVisible(true); Module.canvas.focus(); });
+
+  // The game sends player 1's key bindings whenever they change (settings_overlay.cpp,
+  // PublishWebBindings), so the panel follows remapping in F10.
+  const keyLabels = {
+    'Mouse left': 'Left click', 'Mouse right': 'Right click', 'Mouse middle': 'Middle click',
+    'Return': 'Enter', 'Left Shift': 'Shift', 'Right Shift': 'Right Shift', 'Left Ctrl': 'Ctrl',
+    'Left Alt': 'Alt', 'Left GUI': 'Cmd', 'Up': '↑', 'Down': '↓', 'Left': '←', 'Right': '→',
+  };
+  window.mkwSetBindings = (json) => {
+    const bindings = JSON.parse(json);
+    document.getElementById('keyboard-off').hidden = bindings.keyboard;
+    for (const cell of document.querySelectorAll('kbd[data-bind]')) {
+      const id = cell.dataset.bind;
+      const name = id === 'mute' ? bindings.mute
+        : !bindings.keyboard ? 'Unmapped'
+        : id.startsWith('axis') ? bindings.axes[id.slice(4)] : bindings.buttons[id];
+      const unbound = !name || name === 'Unmapped' || name === 'Unknown';
+      cell.textContent = unbound ? '—' : keyLabels[name] || name;
+      cell.classList.toggle('unbound', unbound);
+      cell.title = unbound ? 'Not bound (F10 → Controller settings)' : '';
+    }
+  };
 
   // Browsers only start audio after a user gesture, so the game waits for this click.
   startButton.addEventListener('click', () => {

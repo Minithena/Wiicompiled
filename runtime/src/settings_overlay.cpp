@@ -39,6 +39,10 @@
 #include <shellapi.h>
 #endif
 
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/em_asm.h>
+#endif
+
 #include <dolphin/pad.h>
 
 extern "C" void PAD_HLE_SetRumbleEnabled(bool enabled);
@@ -1380,6 +1384,51 @@ void PersistDisplayModeIfChanged() {
     RuntimeConfigFile::SetDisplayMode(std::string(kDisplayModeConfigNames[static_cast<size_t>(active)]));
 }
 
+#if defined(__EMSCRIPTEN__)
+// Tells the page's controls panel (window.mkwSetBindings in shell.html) which keys port 0 uses,
+// so it follows remapping in F10. Sent only when something changed; "keyboard":false when the
+// port has no keyboard. Button keys follow kControllerButtons, axes use their PAD_AXIS_* index.
+void PublishWebBindings() {
+    static std::string published;
+    const auto quoted = [](const char* text) {
+        std::string out = "\"";
+        for (const char* c = text; *c; ++c) {
+            if (*c == '"' || *c == '\\') out += '\\';
+            out += *c;
+        }
+        return out + '"';
+    };
+    std::string json = "{\"mute\":" + quoted(KeyBindingName(g_muteHotkey));
+    uint32_t count = 0;
+    const PADKeyButtonBinding* buttons = PADGetKeyButtonBindings(0, &count);
+    if (buttons == nullptr) {
+        json += ",\"keyboard\":false}";
+    } else {
+        json += ",\"keyboard\":true,\"buttons\":{";
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto it = std::find_if(kControllerButtons.begin(), kControllerButtons.end(),
+                                         [&](const auto& item) { return item.padButton == buttons[i].padButton; });
+            if (it == kControllerButtons.end()) continue;
+            if (json.back() != '{') json += ',';
+            json += quoted(it->configKey) + ':' + quoted(KeyBindingName(buttons[i].scancode));
+        }
+        json += "},\"axes\":{";
+        uint32_t axisCount = 0;
+        const PADKeyAxisBinding* axes = PADGetKeyAxisBindings(0, &axisCount);
+        for (uint32_t i = 0; axes != nullptr && i < axisCount; ++i) {
+            if (json.back() != '{') json += ',';
+            json += '"' + std::to_string(axes[i].padAxis) + "\":" + quoted(KeyBindingName(axes[i].scancode));
+        }
+        json += "}}";
+    }
+    if (json == published) return;
+    published = json;
+    MAIN_THREAD_EM_ASM({
+        if (typeof window.mkwSetBindings === 'function') window.mkwSetBindings(UTF8ToString($0));
+    }, json.c_str());
+}
+#endif
+
 void ApplyInputBlockState() {
     const bool blocked = controller_mapping_wizard::IsActive() || g_rebind.active ||
                          g_exitPromptOpen || g_topBarVisible || StartupScreenVisible();
@@ -1512,6 +1561,9 @@ void Draw() noexcept {
     controller_mapping_wizard::Draw();
     ApplyInputBlockState();
     DrawStartupScreen();
+#if defined(__EMSCRIPTEN__)
+    PublishWebBindings();
+#endif
 }
 
 bool StartupScreenVisible() noexcept {
