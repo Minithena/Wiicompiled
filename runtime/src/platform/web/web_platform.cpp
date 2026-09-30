@@ -104,6 +104,11 @@ void MountGame() {
     if (std::filesystem::exists(stagedSave, ec) && !std::filesystem::exists(nandSave, ec)) {
         std::filesystem::create_directories(nandSave.parent_path(), ec);
         std::filesystem::copy_file(stagedSave, nandSave, ec);
+        // The copy inherits the read-only mode of the served file; the game must write its save.
+        if (!ec) {
+            std::filesystem::permissions(nandSave, std::filesystem::perms::owner_read |
+                std::filesystem::perms::owner_write, std::filesystem::perm_options::replace, ec);
+        }
         std::printf("[web] %s the staged save into the NAND\n", ec ? "could not copy" : "copied");
     }
 }
