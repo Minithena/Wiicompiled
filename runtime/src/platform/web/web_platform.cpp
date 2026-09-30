@@ -20,6 +20,7 @@
 #include <chrono>
 #include <thread>
 
+#include <emscripten/em_asm.h>
 #include <emscripten/proxying.h>
 #include <emscripten/wasmfs.h>
 #include <pthread.h>
@@ -95,19 +96,69 @@ void MountGame() {
     }
     std::printf("[web] mounted %zu game files at %s (game thread %p)\n", files, kGameMount,
                 reinterpret_cast<void*>(pthread_self()));
+}
 
-    // Seed the (in-memory) NAND with the save staged next to the disc, if any.
-    const std::filesystem::path stagedSave = std::string(kGameMount) + "/save/rksys.dat";
-    const std::filesystem::path nandSave = RuntimeConfigFile::ApplicationDataDirectory() /
-        "NAND/title/00010004/524d4350/data/rksys.dat";
+std::string DefaultConfigText() {
+    return "[video]\n"
+           "widescreen = true\n"
+           "resolution_multiplier = 1.0\n"
+           "graphics_api = \"auto\"\n"
+           "\n"
+           "[paths]\n"
+           "dvd_root = \"/game/DATA\"\n";
+}
+
+namespace {
+bool EnvFlag(const char* name) {
+    const char* value = std::getenv(name);
+    return value && *value == '1';
+}
+
+bool OpfsAvailable() {
+    return EM_ASM_INT({
+        return typeof navigator !== 'undefined' && navigator.storage &&
+               typeof navigator.storage.getDirectory === 'function' ? 1 : 0;
+    }) != 0;
+}
+} // namespace
+
+void UsePersistentStorage() {
+    namespace fs = std::filesystem;
     std::error_code ec;
-    if (std::filesystem::exists(stagedSave, ec) && !std::filesystem::exists(nandSave, ec)) {
-        std::filesystem::create_directories(nandSave.parent_path(), ec);
-        std::filesystem::copy_file(stagedSave, nandSave, ec);
+    if (!OpfsAvailable()) {
+        std::printf("[web] browser storage (OPFS) unavailable: settings and saves last this session only\n");
+    } else if (backend_t opfs = wasmfs_create_opfs_backend();
+               opfs && wasmfs_create_directory("/persist", 0777, opfs) == 0) {
+        const fs::path root = fs::path("/persist") / "WiiCompiled";
+        fs::create_directories(root, ec);
+        const fs::path config = root / "Config.toml";
+        if (!fs::exists(config, ec)) {
+            std::ofstream(config) << DefaultConfigText();
+        }
+        RuntimePlatform::g_webDataRoot = "/persist";
+        RuntimeConfigFile::ReloadAfterStorageSwitch();
+        std::printf("[web] settings, key bindings and saves are kept in this browser's storage\n");
+    } else {
+        std::printf("[web] could not mount browser storage: settings and saves last this session only\n");
+    }
+
+    // "?muted" mutes this session without changing the saved setting.
+    if (EnvFlag("MKW_WEB_MUTED")) {
+        const_cast<RuntimeUserConfig&>(RuntimeConfigFile::Get()).audioMuted = true;
+    }
+
+    // Seed the NAND with the save staged next to the disc: once, or again for "?resetsave".
+    const fs::path stagedSave = std::string(kGameMount) + "/save/rksys.dat";
+    const fs::path nandSave = RuntimeConfigFile::ApplicationDataDirectory() /
+        "NAND/title/00010004/524d4350/data/rksys.dat";
+    const bool reset = EnvFlag("MKW_WEB_RESET_SAVE");
+    if (fs::exists(stagedSave, ec) && (reset || !fs::exists(nandSave, ec))) {
+        fs::create_directories(nandSave.parent_path(), ec);
+        fs::copy_file(stagedSave, nandSave, fs::copy_options::overwrite_existing, ec);
         // The copy inherits the read-only mode of the served file; the game must write its save.
         if (!ec) {
-            std::filesystem::permissions(nandSave, std::filesystem::perms::owner_read |
-                std::filesystem::perms::owner_write, std::filesystem::perm_options::replace, ec);
+            fs::permissions(nandSave, fs::perms::owner_read | fs::perms::owner_write,
+                            fs::perm_options::replace, ec);
         }
         std::printf("[web] %s the staged save into the NAND\n", ec ? "could not copy" : "copied");
     }
@@ -186,18 +237,7 @@ __attribute__((constructor(101))) static void WriteDefaultConfig() {
     if (std::filesystem::exists(configPath, ec)) {
         return;
     }
-    std::ofstream config(configPath);
-    config << "[video]\n"
-              "widescreen = true\n"
-              "resolution_multiplier = 1.0\n"
-              "graphics_api = \"auto\"\n"
-              "\n"
-              "[paths]\n"
-              "dvd_root = \"/game/DATA\"\n";
-    // The page sets this for a "?muted" URL (shell.html).
-    if (const char* muted = std::getenv("MKW_WEB_MUTED"); muted && *muted == '1') {
-        config << "\n[audio]\nmuted = true\n";
-    }
+    std::ofstream(configPath) << WebPlatform::DefaultConfigText();
 }
 
 #endif

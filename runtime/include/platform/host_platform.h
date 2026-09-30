@@ -23,4 +23,10 @@ std::filesystem::path LogDirectory(std::string_view applicationName);
 
 uint64_t CurrentProcessId() noexcept;
 
+#if defined(__EMSCRIPTEN__)
+// Root of user state on the web: "/data" (in memory) until the persistent browser storage is
+// mounted, then "/persist" (web_platform.cpp).
+extern const char* g_webDataRoot;
+#endif
+
 } // namespace RuntimePlatform

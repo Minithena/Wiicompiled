@@ -1541,6 +1541,7 @@ int main(int argc, char** argv) {
     std::setvbuf(stderr, nullptr, _IONBF, 0);
     try {
         WebPlatform::MountGame();
+        WebPlatform::UsePersistentStorage();
         WebPlatform::StartWatchdog();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "[web] start-up failed: %s\n", e.what());

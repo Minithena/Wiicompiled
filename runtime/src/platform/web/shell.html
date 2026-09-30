@@ -133,7 +133,10 @@
 
   var Module = {
     canvas: document.getElementById('canvas'),
-    preRun: [() => { if (params.has('muted')) ENV.MKW_WEB_MUTED = '1'; }],
+    preRun: [() => {
+      if (params.has('muted')) ENV.MKW_WEB_MUTED = '1';
+      if (params.has('resetsave')) ENV.MKW_WEB_RESET_SAVE = '1';
+    }],
     print: (text) => console.log(text),
     printErr: (text) => console.error(text),
     setStatus: (text) => { statusEl.textContent = text; },

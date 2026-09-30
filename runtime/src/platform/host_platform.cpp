@@ -19,6 +19,10 @@
 
 namespace RuntimePlatform {
 
+#if defined(__EMSCRIPTEN__)
+const char* g_webDataRoot = "/data";
+#endif
+
 std::optional<std::filesystem::path> ExecutableDirectory() noexcept {
 #if defined(_WIN32)
     std::wstring buffer(MAX_PATH, L'\0');
@@ -70,8 +74,7 @@ std::filesystem::path ApplicationDataDirectory(std::string_view applicationName)
         return std::filesystem::path(user->pw_dir) / "Library" / "Application Support" / applicationName;
     }
 #elif defined(__EMSCRIPTEN__)
-    // In-memory for now; the page writes Config.toml here before the game starts.
-    return std::filesystem::path("/data") / applicationName;
+    return std::filesystem::path(g_webDataRoot) / applicationName;
 #endif
     return std::filesystem::current_path() / applicationName;
 }

@@ -532,6 +532,14 @@ inline const RuntimeUserConfig& Get() {
     return config;
 }
 
+#if defined(__EMSCRIPTEN__)
+// The web build reads a default Config.toml during static initialization, then switches to
+// persistent storage in main(); this re-reads it there, before any other thread exists.
+inline void ReloadAfterStorageSwitch() {
+    const_cast<RuntimeUserConfig&>(Get()) = LoadConfigFile();
+}
+#endif
+
 inline RuntimeUserConfig& Mutable() {
     return const_cast<RuntimeUserConfig&>(Get());
 }
