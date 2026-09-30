@@ -42,6 +42,7 @@
 
 #if defined(__EMSCRIPTEN__)
 #include <emscripten/em_asm.h>
+#include <emscripten/emscripten.h>
 #include "platform/web/web_vnet.h"
 #endif
 
@@ -459,9 +460,15 @@ struct RebindState {
     std::string label;
     std::array<bool, SDL_SCANCODE_COUNT> keys{};
     uint32_t mouse = 0;
+    uint8_t mousePressed = 0;
     std::array<bool, SDL_GAMEPAD_BUTTON_COUNT> buttons{};
     std::array<bool, SDL_GAMEPAD_AXIS_COUNT> axesReady{};
 } g_rebind;
+
+#if defined(__EMSCRIPTEN__)
+std::atomic<uint32_t> g_webRebindRequest{0};
+bool g_webRebindPrompt = false;
+#endif
 
 void BeginRebind(RebindKind kind, uint16_t target, const char* label, bool secondary = false) {
     g_rebind = {};
@@ -545,16 +552,27 @@ void DrawRebindPrompt() {
         ImGui::TextUnformatted("Release any held input first. Backspace or Delete clears the mapping.");
         ImGui::TextUnformatted("Escape can be bound. F10 is reserved for settings.");
         const float remaining = std::chrono::duration<float>(g_rebind.deadline - Clock::now()).count();
-        ImGui::Text("Unmapped in %d seconds", std::max(0, static_cast<int>(std::ceil(remaining))));
+        bool cancelOnTimeout = false;
+#if defined(__EMSCRIPTEN__)
+        cancelOnTimeout = g_webRebindPrompt;
+#endif
+        ImGui::Text(cancelOnTimeout ? "Cancel in %d seconds" : "Unmapped in %d seconds",
+                    std::max(0, static_cast<int>(std::ceil(remaining))));
         const bool clear = ImGui::Button("Clear mapping");
         ImGui::SameLine();
         if (ImGui::Button("Cancel")) g_rebind.active = false;
         // UI clicks must not become mouse bindings (buttons activate on release).
         const bool overControl = ImGui::IsAnyItemHovered();
-        if (g_rebind.active && (clear || remaining <= 0.0f)) {
+        if (g_rebind.active && remaining <= 0.0f && cancelOnTimeout) {
+            g_rebind.active = false;
+        } else if (g_rebind.active && (clear || remaining <= 0.0f)) {
             CompleteRebind(g_rebind.kind == RebindKind::Controller ? PAD_NATIVE_BUTTON_DISABLED
                                                                   : static_cast<uint32_t>(PAD_KEY_INVALID));
         } else if (g_rebind.active && SDL_GetKeyboardFocus() != nullptr && g_rebind.kind != RebindKind::Controller) {
+            const uint8_t mousePressed = std::exchange(g_rebind.mousePressed, 0);
+            if (!overControl && mousePressed != 0 && g_rebind.kind != RebindKind::MuteHotkey) {
+                CompleteRebind(static_cast<uint32_t>(-static_cast<int>(mousePressed) - 1));
+            }
             int count = 0;
             const bool* keys = SDL_GetKeyboardState(&count);
             for (int i = 1; i < std::min(count, static_cast<int>(SDL_SCANCODE_COUNT)) && g_rebind.active; ++i) {
@@ -1387,6 +1405,33 @@ void PersistDisplayModeIfChanged() {
 }
 
 #if defined(__EMSCRIPTEN__)
+// The page queues a request with an atomic-only export. The game thread owns all SDL/ImGui
+// state and applies it at the next frame, reusing the existing binding persistence path.
+void ProcessWebRebindRequest() {
+    const uint32_t request = g_webRebindRequest.exchange(0, std::memory_order_relaxed);
+    if (request == 0) return;
+    if (request == 200) {
+        BeginRebind(RebindKind::MuteHotkey, 0, "Mute / unmute");
+    } else if (request >= 100 && request < 200) {
+        uint32_t count = 0;
+        const auto* axes = PADGetKeyAxisBindings(0, &count);
+        bool found = false;
+        for (uint32_t i = 0; axes != nullptr && i < count; ++i) found |= axes[i].padAxis == request - 100;
+        if (!found) return;
+        BeginRebind(RebindKind::KeyboardAxis, static_cast<uint16_t>(request - 100), "Direction");
+    } else if (request <= kControllerButtons.size()) {
+        uint32_t count = 0;
+        if (PADGetKeyButtonBindings(0, &count) == nullptr) return;
+        const auto& button = kControllerButtons[request - 1];
+        BeginRebind(RebindKind::KeyboardButton, button.padButton, button.label);
+    } else {
+        return;
+    }
+    g_rebind.port = 0;
+    g_webRebindPrompt = true;
+    g_topBarVisible = false;
+}
+
 // Tells the page's controls panel (window.mkwSetBindings in shell.html) which keys port 0 uses,
 // so it follows remapping in F10. Sent only when something changed; "keyboard":false when the
 // port has no keyboard. Button keys follow kControllerButtons, axes use their PAD_AXIS_* index.
@@ -1401,10 +1446,11 @@ void PublishWebBindings() {
         return out + '"';
     };
     std::string json = "{\"mute\":" + quoted(KeyBindingName(g_muteHotkey));
+    std::string requests = "{\"mute\":200";
     uint32_t count = 0;
     const PADKeyButtonBinding* buttons = PADGetKeyButtonBindings(0, &count);
     if (buttons == nullptr) {
-        json += ",\"keyboard\":false}";
+        json += ",\"keyboard\":false";
     } else {
         json += ",\"keyboard\":true,\"buttons\":{";
         for (uint32_t i = 0; i < count; ++i) {
@@ -1413,6 +1459,8 @@ void PublishWebBindings() {
             if (it == kControllerButtons.end()) continue;
             if (json.back() != '{') json += ',';
             json += quoted(it->configKey) + ':' + quoted(KeyBindingName(buttons[i].scancode));
+            requests += ',' + quoted(it->configKey) + ':' +
+                        std::to_string(std::distance(kControllerButtons.begin(), it) + 1);
         }
         json += "},\"axes\":{";
         uint32_t axisCount = 0;
@@ -1420,9 +1468,12 @@ void PublishWebBindings() {
         for (uint32_t i = 0; axes != nullptr && i < axisCount; ++i) {
             if (json.back() != '{') json += ',';
             json += '"' + std::to_string(axes[i].padAxis) + "\":" + quoted(KeyBindingName(axes[i].scancode));
+            requests += ",\"axis" + std::to_string(axes[i].padAxis) + "\":" + std::to_string(100 + axes[i].padAxis);
         }
-        json += "}}";
+        json += '}';
     }
+    json += ",\"requests\":" + requests + "},\"editing\":" +
+            (g_webRebindPrompt && g_rebind.active ? "true" : "false") + '}';
     if (json == published) return;
     published = json;
     MAIN_THREAD_EM_ASM({
@@ -1532,6 +1583,11 @@ void HandleEvents(const AuroraEvent* events) noexcept {
             CompleteRebind(static_cast<uint32_t>(ev->sdl.key.scancode));
             continue;
         }
+        if (g_rebind.active && g_rebind.kind != RebindKind::Controller &&
+            ev->sdl.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev->sdl.button.button <= 5) {
+            // Keep short clicks until the prompt can reject clicks on its Cancel/Clear controls.
+            g_rebind.mousePressed = ev->sdl.button.button;
+        }
         if (!g_rebind.active && IsToggleKey(ev->sdl, SDL_SCANCODE_F10)) {
             SetTopBarVisible(!g_topBarVisible);
             ApplyInputBlockState();
@@ -1593,6 +1649,7 @@ void Draw() noexcept {
     UpdateCursorAutoHide();
     UpdateBootShaderState();
 #if defined(__EMSCRIPTEN__)
+    ProcessWebRebindRequest();
     PublishWebBindings();
     WebVnet::Pump();
 #endif
@@ -1608,6 +1665,12 @@ void Draw() noexcept {
     }
     DrawFpsOverlay();
     DrawTopBar();
+#if defined(__EMSCRIPTEN__)
+    if (g_webRebindPrompt) {
+        DrawRebindPrompt();
+        if (!g_rebind.active) g_webRebindPrompt = false;
+    }
+#endif
     DrawExitPrompt();
     controller_mapping_wizard::Draw();
     ApplyInputBlockState();
@@ -1629,4 +1692,9 @@ void NotifyStrapInputAccepted() noexcept {
 }
 
 void AdvancePresentedFrame() noexcept { ++g_presentedFrame; }
+#if defined(__EMSCRIPTEN__)
+extern "C" EMSCRIPTEN_KEEPALIVE void mkw_web_rebind(uint32_t request) {
+    g_webRebindRequest.store(request, std::memory_order_relaxed);
+}
+#endif
 } // namespace settings_overlay

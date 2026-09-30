@@ -19,17 +19,25 @@ addToLibrary({
 
     // The backend must be registered before this function yields (the proxy starts calling it
     // straight away), so lookups wait on the manifest instead.
+    let manifestBytes;
     const sizesReady = (async () => {
       const sizes = new Map();
-      const response = await fetch('game/manifest.txt');
-      if (response.ok) {
-        for (const line of (await response.text()).split('\n')) {
-          const match = /^f (\d+) (.+)$/.exec(line);
-          if (match) sizes.set('/game/' + match[2], Number(match[1]));
-        }
+      const response = await fetch('game/manifest.txt', {cache: 'no-store'});
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      manifestBytes = new Uint8Array(await response.arrayBuffer());
+      for (const line of new TextDecoder().decode(manifestBytes).split(/\r?\n/)) {
+        const match = /^f (\d+) (.+)$/.exec(line);
+        if (match) sizes.set('/game/' + match[2], Number(match[1]));
       }
+      if (!(sizes.get('/game/DATA/sys/fst.bin') > 0)) throw new Error('missing disc file entries');
+      // The manifest has already arrived. Reuse its bytes instead of a second HEAD/range
+      // request, whose cached or stripped Content-Length can incorrectly report an empty file.
+      sizes.set('/game/manifest.txt', manifestBytes.byteLength);
       return sizes;
-    })();
+    })().catch((failed) => {
+      console.error('[web] Failed to load game manifest: ' + failed);
+      return null;
+    });
 
     // file pointer -> { url, size, chunkSize, chunks: Map<index, Uint8Array> }
     const files = new Map();
@@ -55,16 +63,28 @@ addToLibrary({
       let info = files.get(file);
       if (info) return info;
       const url = new URL(UTF8ToString(__wasmfs_fetch_get_file_url(file)), self.location.href);
-      const key = url.pathname.replace(/\/+/g, '/');
-      let size = (await sizesReady).get(key);
+      url.pathname = url.pathname.replace(/\/+/g, '/');
+      const key = url.pathname;
+      const sizes = await sizesReady;
+      if (!sizes) throw new Error('Game manifest could not be loaded');
+      let size = sizes.get(key);
       if (size === undefined) {
-        // Not in the manifest (the manifest itself): ask the server.
+        // Optional files absent from the manifest still need a metadata lookup.
         const head = await fetch(url, {method: 'HEAD'});
         if (!head.ok) throw head;
-        size = Number(head.headers.get('Content-Length'));
+        const length = head.headers.get('Content-Length');
+        size = length === null ? NaN : Number(length);
+        if (!Number.isSafeInteger(size) || size < 0) throw new Error('Missing file length: ' + key);
       }
       info = {url, size, chunkSize: __wasmfs_fetch_get_chunk_size(file), chunks: new Map()};
       files.set(file, info);
+      if (key === '/game/manifest.txt') {
+        for (let offset = 0, index = 0; offset < size; offset += info.chunkSize, index++) {
+          const chunk = manifestBytes.slice(offset, offset + info.chunkSize);
+          info.chunks.set(index, chunk);
+          touch(file, index, chunk.byteLength);
+        }
+      }
       return info;
     }
 

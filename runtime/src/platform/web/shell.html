@@ -34,10 +34,13 @@
   dl { display: grid; grid-template-columns: auto 1fr; gap: 7px 12px; margin: 0; align-items: center; }
   dt { display: flex; gap: 4px; flex-wrap: wrap; }
   dd { margin: 0; color: var(--muted); }
-  kbd { font: 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text);
+  kbd, button.binding { font: 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text);
         background: var(--key-bg); border: 1px solid var(--key-line); border-bottom-width: 2px;
         border-radius: 5px; padding: 3px 6px; white-space: nowrap; }
-  kbd.unbound { color: var(--muted); border-style: dashed; }
+  .binding { cursor: pointer; }
+  .binding:disabled { cursor: default; opacity: .65; }
+  .binding:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .binding.unbound { color: var(--muted); border-style: dashed; }
   .note { color: var(--muted); font-size: 12px; margin: 18px 0 0; }
   #room-panel { border-bottom: 1px solid var(--line); padding-bottom: 16px; margin-bottom: 16px; }
   #room-panel h2 { margin-bottom: 10px; }
@@ -102,27 +105,28 @@
       <h2>Controls</h2>
       <button id="hide-controls" class="link">Hide</button>
     </div>
+    <p class="note" id="binding-help" role="status">Start the game, then click a key to change it.</p>
     <h3>Driving</h3>
     <dl>
-      <dt><kbd data-bind="axis1">A</kbd><kbd data-bind="axis0">D</kbd></dt><dd>Steer</dd>
-      <dt><kbd data-bind="a">Left click</kbd></dt><dd>Accelerate</dd>
-      <dt><kbd data-bind="b">Space</kbd></dt><dd>Brake / reverse</dd>
-      <dt><kbd data-bind="r">Right click</kbd></dt><dd>Drift, hop, trick</dd>
-      <dt><kbd data-bind="l">Shift</kbd></dt><dd>Use item</dd>
-      <dt><kbd data-bind="axis2">W</kbd><kbd data-bind="axis3">S</kbd></dt><dd>Aim item forward / back</dd>
-      <dt><kbd data-bind="start">Enter</kbd></dt><dd>Pause</dd>
+      <dt><button type="button" class="binding" data-bind="axis1" disabled>A</button><button type="button" class="binding" data-bind="axis0" disabled>D</button></dt><dd>Steer</dd>
+      <dt><button type="button" class="binding" data-bind="a" disabled>Left click</button></dt><dd>Accelerate</dd>
+      <dt><button type="button" class="binding" data-bind="b" disabled>Space</button></dt><dd>Brake / reverse</dd>
+      <dt><button type="button" class="binding" data-bind="r" disabled>Right click</button></dt><dd>Drift, hop, trick</dd>
+      <dt><button type="button" class="binding" data-bind="l" disabled>Shift</button></dt><dd>Use item</dd>
+      <dt><button type="button" class="binding" data-bind="axis2" disabled>W</button><button type="button" class="binding" data-bind="axis3" disabled>S</button></dt><dd>Aim item forward / back</dd>
+      <dt><button type="button" class="binding" data-bind="start" disabled>Enter</button></dt><dd>Pause</dd>
     </dl>
     <h3>Menus</h3>
     <dl>
-      <dt><kbd data-bind="axis2">W</kbd><kbd data-bind="axis1">A</kbd><kbd data-bind="axis3">S</kbd><kbd data-bind="axis0">D</kbd></dt><dd>Move</dd>
-      <dt><kbd data-bind="a">Left click</kbd></dt><dd>Confirm (A)</dd>
-      <dt><kbd data-bind="b">Space</kbd></dt><dd>Back (B)</dd>
-      <dt><kbd data-bind="up">↑</kbd><kbd data-bind="left">←</kbd><kbd data-bind="down">↓</kbd><kbd data-bind="right">→</kbd></dt><dd>D-pad</dd>
+      <dt><button type="button" class="binding" data-bind="axis2" disabled>W</button><button type="button" class="binding" data-bind="axis1" disabled>A</button><button type="button" class="binding" data-bind="axis3" disabled>S</button><button type="button" class="binding" data-bind="axis0" disabled>D</button></dt><dd>Move</dd>
+      <dt><button type="button" class="binding" data-bind="a" disabled>Left click</button></dt><dd>Confirm (A)</dd>
+      <dt><button type="button" class="binding" data-bind="b" disabled>Space</button></dt><dd>Back (B)</dd>
+      <dt><button type="button" class="binding" data-bind="up" disabled>↑</button><button type="button" class="binding" data-bind="left" disabled>←</button><button type="button" class="binding" data-bind="down" disabled>↓</button><button type="button" class="binding" data-bind="right" disabled>→</button></dt><dd>D-pad</dd>
     </dl>
     <h3>Game</h3>
     <dl>
       <dt><kbd>F10</kbd></dt><dd>Settings and key bindings</dd>
-      <dt><kbd data-bind="mute">\</kbd></dt><dd>Mute / unmute</dd>
+      <dt><button type="button" class="binding" data-bind="mute" disabled>\</button></dt><dd>Mute / unmute</dd>
     </dl>
     <p class="note" id="keyboard-off" hidden>The keyboard is turned off for player 1: turn it on in
       <kbd>F10</kbd> → Controller settings.</p>
@@ -278,10 +282,11 @@
     'Return': 'Enter', 'Left Shift': 'Shift', 'Right Shift': 'Right Shift', 'Left Ctrl': 'Ctrl',
     'Left Alt': 'Alt', 'Left GUI': 'Cmd', 'Up': '↑', 'Down': '↓', 'Left': '←', 'Right': '→',
   };
+  let liveBindings = null;
   window.mkwSetBindings = (json) => {
-    const bindings = JSON.parse(json);
+    const bindings = liveBindings = JSON.parse(json);
     document.getElementById('keyboard-off').hidden = bindings.keyboard;
-    for (const cell of document.querySelectorAll('kbd[data-bind]')) {
+    for (const cell of document.querySelectorAll('[data-bind]')) {
       const id = cell.dataset.bind;
       const name = id === 'mute' ? bindings.mute
         : !bindings.keyboard ? 'Unmapped'
@@ -289,9 +294,23 @@
       const unbound = !name || name === 'Unmapped' || name === 'Unknown';
       cell.textContent = unbound ? '—' : keyLabels[name] || name;
       cell.classList.toggle('unbound', unbound);
-      cell.title = unbound ? 'Not bound (F10 → Controller settings)' : '';
+      const action = cell.closest('dt')?.nextElementSibling?.textContent || id;
+      cell.disabled = bindings.requests?.[id] === undefined || typeof Module._mkw_web_rebind !== 'function';
+      cell.title = 'Change ' + action;
+      cell.setAttribute('aria-label', 'Change ' + action + ': ' + cell.textContent);
     }
+    document.getElementById('binding-help').textContent = bindings.editing
+      ? 'Press a key or click a mouse button in the game. Cancel keeps the current binding.'
+      : 'Click a key to change it. Changes are saved in this browser.';
   };
+  for (const cell of document.querySelectorAll('[data-bind]')) {
+    cell.addEventListener('click', () => {
+      const request = liveBindings?.requests?.[cell.dataset.bind];
+      if (request === undefined || typeof Module._mkw_web_rebind !== 'function') return;
+      Module._mkw_web_rebind(request);
+      Module.canvas.focus();
+    });
+  }
 
   // Browsers only start audio after a user gesture, so the game waits for this click.
   startButton.addEventListener('click', () => {

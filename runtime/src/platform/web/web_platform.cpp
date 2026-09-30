@@ -94,8 +94,17 @@ void MountGame() {
         }
         files += line[0] == 'f';
     }
+    if (manifest.bad() || files == 0 || !std::filesystem::exists("/game/DATA/sys/fst.bin")) {
+        throw std::runtime_error("Game files could not be loaded. Reload the page after signing in.");
+    }
     std::printf("[web] mounted %zu game files at %s (game thread %p)\n", files, kGameMount,
                 reinterpret_cast<void*>(pthread_self()));
+}
+
+void ReportFatalError(const char* message) noexcept {
+    MAIN_THREAD_EM_ASM({
+        if (Module.onAbort) Module.onAbort(UTF8ToString($0));
+    }, message);
 }
 
 std::string DefaultConfigText() {

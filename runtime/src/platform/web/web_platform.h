@@ -9,6 +9,9 @@ namespace WebPlatform {
 // Config.toml is written earlier, by a static constructor.
 void MountGame();
 
+// Shows fatal startup/runtime errors on the page as well as in the console.
+void ReportFatalError(const char* message) noexcept;
+
 // Mounts the browser's persistent storage (OPFS) and moves user state there: settings, key
 // bindings, saves and logs survive reloads. Seeds the NAND from game/save/rksys.dat once (or
 // again for "?resetsave"). Call after MountGame, before RuntimeMain.

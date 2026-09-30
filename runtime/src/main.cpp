@@ -785,6 +785,9 @@ void ShowRuntimeFatalPopup(std::string_view category, std::string_view details) 
             }
         }
         message.append("\n\nSee the WiiCompiled Logs folder for the full diagnostic.");
+#if defined(__EMSCRIPTEN__)
+        WebPlatform::ReportFatalError(message.c_str());
+#endif
 #if defined(_WIN32)
         ::MessageBoxA(nullptr, message.c_str(), "WiiCompiled - Fatal Error",
                       MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TASKMODAL);
@@ -1545,6 +1548,7 @@ int main(int argc, char** argv) {
         WebPlatform::StartWatchdog();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "[web] start-up failed: %s\n", e.what());
+        WebPlatform::ReportFatalError(e.what());
         return 1;
     }
     const int status = RuntimeMain(argc, argv);
