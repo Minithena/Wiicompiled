@@ -284,7 +284,7 @@ function(mkw_configure_product target)
         # (HostContext, mkw_fibers.js), which all run on that one thread. WASMFS provides the lazy
         # fetch-backed disc mount (web_platform.cpp).
         set_target_properties(${target} PROPERTIES SUFFIX ".html"
-            LINK_DEPENDS "${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/shell.html")
+            LINK_DEPENDS "${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/shell.html;${MKW_RUNTIME_SOURCE_DIR}/assets/pipeline/initial_pipeline_cache.db")
         target_link_options(${target} PRIVATE
             --use-port=emdawnwebgpu -sJSPI -sJSPI_EXPORTS=mkw_fiber_entry -sPROXY_TO_PTHREAD
             "--js-library=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/mkw_fibers.js"
@@ -297,7 +297,9 @@ function(mkw_configure_product target)
             "--shell-file=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/shell.html"
             "--pre-js=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/shader_diagnostics.js"
             "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/wii@/app/wii_bootstrap"
-            "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/dsp/dsp_coef.bin@/app/dsp_coef.bin")
+            "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/dsp/dsp_coef.bin@/app/dsp_coef.bin"
+            # Aurora looks for it in SDL's base path ("/" on the web) and prewarms from it.
+            "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/pipeline/initial_pipeline_cache.db@/initial_pipeline_cache.db")
         return()
     endif()
 

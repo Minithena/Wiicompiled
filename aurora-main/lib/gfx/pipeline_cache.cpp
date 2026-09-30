@@ -29,6 +29,9 @@ static Module Log("aurora::gfx::pipeline_cache");
 constexpr int PipelineCacheSchema = 1;
 constexpr const char* InitialPipelineCacheName = "initial_pipeline_cache.db";
 constexpr const char* SdlVfsName = "aurora_pipeline_cache_sdl_vfs";
+constexpr const char* PipelineCacheLoadSql = "SELECT hash, config, first_frame_used FROM pipeline_cache "
+                                             "WHERE type = ? AND config_version = ? "
+                                             "ORDER BY first_frame_used ASC, rowid ASC";
 
 struct CachedPipeline {
   wgpu::RenderPipeline pipeline;
@@ -792,11 +795,8 @@ INSERT INTO aurora_schema VALUES ({});)",
     return false;
   }
 
-  ret = sqlite3_prepare_v3(g_pipelineCacheDb,
-                           "SELECT hash, config, first_frame_used FROM pipeline_cache "
-                           "WHERE type = ? AND config_version = ? "
-                           "ORDER BY first_frame_used ASC, rowid ASC",
-                           -1, SQLITE_PREPARE_PERSISTENT, &g_pipelineCacheLoadStmt, nullptr);
+  ret = sqlite3_prepare_v3(g_pipelineCacheDb, PipelineCacheLoadSql, -1, SQLITE_PREPARE_PERSISTENT,
+                           &g_pipelineCacheLoadStmt, nullptr);
   if (ret != SQLITE_OK) {
     Log.error("Failed to prepare pipeline cache load statement: {}", sqlite3_errmsg(g_pipelineCacheDb));
     pipeline_cache_abort();
@@ -1053,29 +1053,26 @@ static size_t pipeline_worker_count() {
 }
 
 template <typename PipelineConfig, typename CreateFn>
-static void load_pipeline_cache_entries(ShaderType type, uint32_t configVersion, CreateFn&& create) {
-  if (!prepare_pipeline_cache_db()) {
-    return;
-  }
-
-  auto ret = sqlite3_bind_int(g_pipelineCacheLoadStmt, 1, underlying(type));
+static void load_pipeline_cache_entries(sqlite3* db, sqlite3_stmt* stmt, ShaderType type, uint32_t configVersion,
+                                        CreateFn&& create) {
+  auto ret = sqlite3_bind_int(stmt, 1, underlying(type));
   if (ret != SQLITE_OK) {
-    Log.error("Failed to bind pipeline cache load type: {}", sqlite3_errmsg(g_pipelineCacheDb));
+    Log.error("Failed to bind pipeline cache load type: {}", sqlite3_errmsg(db));
     pipeline_cache_abort();
     return;
   }
-  ret = sqlite3_bind_int(g_pipelineCacheLoadStmt, 2, static_cast<int>(configVersion));
+  ret = sqlite3_bind_int(stmt, 2, static_cast<int>(configVersion));
   if (ret != SQLITE_OK) {
-    Log.error("Failed to bind pipeline cache load config version: {}", sqlite3_errmsg(g_pipelineCacheDb));
+    Log.error("Failed to bind pipeline cache load config version: {}", sqlite3_errmsg(db));
     pipeline_cache_abort();
     return;
   }
 
-  while ((ret = sqlite3_step(g_pipelineCacheLoadStmt)) == SQLITE_ROW) {
-    const auto storedHash = static_cast<PipelineRef>(sqlite3_column_int64(g_pipelineCacheLoadStmt, 0));
-    const auto* configBlob = static_cast<const uint8_t*>(sqlite3_column_blob(g_pipelineCacheLoadStmt, 1));
-    const auto configSize = sqlite3_column_bytes(g_pipelineCacheLoadStmt, 1);
-    const auto firstFrameUsed = static_cast<uint32_t>(sqlite3_column_int64(g_pipelineCacheLoadStmt, 2));
+  while ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
+    const auto storedHash = static_cast<PipelineRef>(sqlite3_column_int64(stmt, 0));
+    const auto* configBlob = static_cast<const uint8_t*>(sqlite3_column_blob(stmt, 1));
+    const auto configSize = sqlite3_column_bytes(stmt, 1);
+    const auto firstFrameUsed = static_cast<uint32_t>(sqlite3_column_int64(stmt, 2));
     if (configSize != static_cast<int>(sizeof(PipelineConfig)) || (configSize != 0 && configBlob == nullptr)) {
       continue;
     }
@@ -1099,12 +1096,21 @@ static void load_pipeline_cache_entries(ShaderType type, uint32_t configVersion,
   }
 
   if (ret != SQLITE_DONE) {
-    Log.error("Failed to read pipeline cache rows: {}", sqlite3_errmsg(g_pipelineCacheDb));
+    Log.error("Failed to read pipeline cache rows: {}", sqlite3_errmsg(db));
     pipeline_cache_abort();
   }
 
-  sqlite3_reset(g_pipelineCacheLoadStmt);
-  sqlite3_clear_bindings(g_pipelineCacheLoadStmt);
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+}
+
+static void begin_pipeline_prewarm() {
+  const auto queued = queuedPipelines.load();
+  if (queued > 0) {
+    g_prewarmCount = queued;
+    g_prewarmStart = std::chrono::steady_clock::now();
+    g_prewarmActive.store(true, std::memory_order_release);
+  }
 }
 
 static void load_pipeline_cache() {
@@ -1115,17 +1121,43 @@ static void load_pipeline_cache() {
   if (g_pipelineCacheBroken) {
     return;
   }
-  load_pipeline_cache_entries<clear::PipelineConfig>(ShaderType::Clear, clear::ClearPipelineConfigVersion,
-                                                     clear::create_pipeline);
-  load_pipeline_cache_entries<gx::PipelineConfig>(ShaderType::GX, gx::GXPipelineConfigVersion,
-                                                  gx::create_pipeline);
-  const auto queued = queuedPipelines.load();
-  if (queued > 0) {
-    g_prewarmCount = queued;
-    g_prewarmStart = std::chrono::steady_clock::now();
-    g_prewarmActive.store(true, std::memory_order_release);
+  load_pipeline_cache_entries<clear::PipelineConfig>(g_pipelineCacheDb, g_pipelineCacheLoadStmt, ShaderType::Clear,
+                                                     clear::ClearPipelineConfigVersion, clear::create_pipeline);
+  if (g_pipelineCacheBroken) {
+    return;
   }
+  load_pipeline_cache_entries<gx::PipelineConfig>(g_pipelineCacheDb, g_pipelineCacheLoadStmt, ShaderType::GX,
+                                                  gx::GXPipelineConfigVersion, gx::create_pipeline);
+  begin_pipeline_prewarm();
 }
+
+#ifdef __EMSCRIPTEN__
+// The web has no writable pipeline cache, so prewarm straight from the bundled seed database
+// (read-only). Its pipelines are queued and built a few per frame behind the boot screen.
+static void load_seed_pipelines() {
+  const auto seedPath = pipeline_cache_seed_path();
+  sqlite3* seedDb = open_pipeline_cache_seed_db(seedPath);
+  if (seedDb == nullptr) {
+    return;
+  }
+  sqlite3_stmt* stmt = nullptr;
+  if (sqlite3_prepare_v3(seedDb, PipelineCacheLoadSql, -1, 0, &stmt, nullptr) != SQLITE_OK) {
+    Log.warn("Failed to read bundled pipeline cache rows from '{}': {}", seedPath, sqlite3_errmsg(seedDb));
+    sqlite3_close(seedDb);
+    return;
+  }
+  load_pipeline_cache_entries<clear::PipelineConfig>(seedDb, stmt, ShaderType::Clear,
+                                                     clear::ClearPipelineConfigVersion, clear::create_pipeline);
+  if (!g_pipelineCacheBroken) {
+    load_pipeline_cache_entries<gx::PipelineConfig>(seedDb, stmt, ShaderType::GX, gx::GXPipelineConfigVersion,
+                                                    gx::create_pipeline);
+  }
+  sqlite3_finalize(stmt);
+  sqlite3_close(seedDb);
+  Log.info("Queued {} bundled pipelines for prewarm", queuedPipelines.load());
+  begin_pipeline_prewarm();
+}
+#endif
 
 static void start_pipeline_cache_writer() {
   if (!prepare_pipeline_cache_db()) {
@@ -1191,8 +1223,10 @@ void initialize_pipeline_cache() {
   }
 
 #ifdef __EMSCRIPTEN__
-  // The SQLite/zstd on-disk pipeline cache (and its writer thread) is disabled on the web for now:
-  // pipelines are recompiled by the browser each session. With no DB open, every cache write is a no-op.
+  // The writable SQLite pipeline cache (and its writer thread) is off on the web: the browser
+  // recompiles pipelines each session, prewarmed from the bundled seed. With no DB open, every cache
+  // write is a no-op.
+  load_seed_pipelines();
   g_pipelineCacheBroken = true;
 #else
   load_pipeline_cache();
