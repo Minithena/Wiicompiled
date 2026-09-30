@@ -22,11 +22,10 @@
 #include "../window.hpp"
 #include "../dolphin/vi/vi_internal.hpp"
 
+// BackendBinding is also used on the web (canvas surface source from emdawnwebgpu).
+#include "../dawn/BackendBinding.hpp"
 #if defined(WEBGPU_DAWN) && !defined(__MINGW32__)
-#include "../dawn/BackendBinding.hpp"
 #include <dawn/native/DawnNative.h>
-#elif defined(WEBGPU_DAWN)
-#include "../dawn/BackendBinding.hpp"
 #endif
 
 #if defined(WEBGPU_DAWN) && defined(_WIN32)
@@ -541,7 +540,12 @@ bool initialize(AuroraBackend auroraBackend) {
       return false;
     }
   }
+#ifdef __EMSCRIPTEN__
+  // The browser picks the adapter; a specific backendType would be rejected by emdawnwebgpu.
+  const wgpu::BackendType backend = wgpu::BackendType::Undefined;
+#else
   const wgpu::BackendType backend = to_wgpu_backend(auroraBackend);
+#endif
   Log.info("Attempting to initialize {}", magic_enum::enum_name(backend));
   // One call is one backend attempt. aurora::initialize() retries without calling shutdown(), so a
   // leftover adapter would pass the `if (!g_adapter)` guard and mismatch adapter with device.
@@ -653,11 +657,18 @@ bool initialize(AuroraBackend auroraBackend) {
       }
       // The presenter calls device and queue methods while the frame worker encodes, which Dawn only
       // supports with this feature; without it the two race inside the device's dynamic uploader.
+#ifndef __EMSCRIPTEN__
       if (feature == wgpu::FeatureName::ImplicitDeviceSynchronization) {
         implicitDeviceSynchronizationSupported = true;
         requiredFeatures.push_back(feature);
       }
+#endif
     }
+#ifdef __EMSCRIPTEN__
+    // Browser WebGPU objects are single-thread-affine; aurora runs the frame worker, presenter and
+    // pipeline compilation inline on the rendering thread on the web, so synchronization is moot.
+    implicitDeviceSynchronizationSupported = true;
+#endif
     if (!implicitDeviceSynchronizationSupported) {
       Log.warn(
           "Adapter does not support ImplicitDeviceSynchronization; multi-threaded presentation is "
@@ -756,6 +767,8 @@ bool initialize(AuroraBackend auroraBackend) {
     if (!g_device) {
       return false;
     }
+#ifdef WEBGPU_DAWN
+    // SetLoggingCallback is a Dawn-native extension, unavailable in emdawnwebgpu
     g_device.SetLoggingCallback([](wgpu::LoggingType type, wgpu::StringView message) {
       AuroraLogLevel level = LOG_FATAL;
       switch (type) {
@@ -776,6 +789,7 @@ bool initialize(AuroraBackend auroraBackend) {
       }
       Log.report(level, "WebGPU message: {}", message);
     });
+#endif
   }
   g_queue = g_device.GetQueue();
 

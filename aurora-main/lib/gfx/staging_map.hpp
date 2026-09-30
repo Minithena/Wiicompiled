@@ -1,5 +1,8 @@
 #pragma once
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#endif
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -50,11 +53,18 @@ public:
   }
 
   void wait_for_progress() {
+#ifdef __EMSCRIPTEN__
+    // Map completions are delivered from the browser event loop of this same thread, so a condition
+    // variable wait would deadlock. Yield through JSPI instead (requires -sJSPI).
+    emscripten_sleep(1);
+    return;
+#else
     std::unique_lock lock(mutex_);
     // ProcessEvents is still serviced between waits for implementations that
     // need it. A spontaneous completion wakes immediately, without polling.
     changed_.wait_for(lock, std::chrono::milliseconds(1),
                       [&] { return state_ != BufferMapState::Mapping; });
+#endif
   }
 };
 

@@ -2,7 +2,7 @@
 
 #include <memory>
 
-#if !defined(SDL_PLATFORM_MACOS) && !defined(SDL_PLATFORM_IOS) && !defined(SDL_PLATFORM_TVOS)
+#if !defined(__EMSCRIPTEN__) && !defined(SDL_PLATFORM_MACOS) && !defined(SDL_PLATFORM_IOS) && !defined(SDL_PLATFORM_TVOS)
 #include <SDL3/SDL_video.h>
 #endif
 
@@ -10,7 +10,15 @@ namespace aurora::webgpu::utils {
 std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptorCocoa(SDL_Window* window);
 
 std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptor(SDL_Window* window) {
-#if defined(SDL_PLATFORM_MACOS) || defined(SDL_PLATFORM_IOS) || defined(SDL_PLATFORM_TVOS)
+#if defined(__EMSCRIPTEN__)
+  // The canvas is selected by CSS selector; with OFFSCREENCANVASES_TO_PTHREAD=#canvas it is
+  // transferred to the rendering pthread and looked up there.
+  static_cast<void>(window);
+  std::shared_ptr<wgpu::EmscriptenSurfaceSourceCanvasHTMLSelector> desc =
+      std::make_shared<wgpu::EmscriptenSurfaceSourceCanvasHTMLSelector>();
+  desc->selector = "#canvas";
+  return std::move(desc);
+#elif defined(SDL_PLATFORM_MACOS) || defined(SDL_PLATFORM_IOS) || defined(SDL_PLATFORM_TVOS)
   return SetupWindowAndGetSurfaceDescriptorCocoa(window);
 #else
   const auto props = SDL_GetWindowProperties(window);

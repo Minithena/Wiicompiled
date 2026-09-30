@@ -51,6 +51,10 @@ void report_producer_paced(bool paced) noexcept;
 } // namespace aurora::gx
 #endif
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#endif
+
 namespace aurora {
 AuroraConfig g_config;
 uint32_t g_sdlCustomEventsStart;
@@ -255,6 +259,11 @@ FrameWorkerState g_frameWorker;
 bool frame_worker_requested() noexcept {
 #ifdef AURORA_ENABLE_GX
   static const bool enabled = [] {
+#if defined(__EMSCRIPTEN__)
+    // Browser WebGPU objects belong to the thread that created them (the proxied main pthread).
+    // Encode, submit and present inline on that thread; there is no frame worker or presenter.
+    return false;
+#endif
 #if defined(__APPLE__)
     // ImGui's SDL backend may raise an SDL window from ImGui::NewFrame(). On
     // macOS that reaches AppKit, whose window operations are main-thread-only;
@@ -1000,10 +1009,19 @@ bool present_presentation_job(const PresentationJob& job) {
                 webgpu::g_graphicsConfig.surfaceConfiguration.height)) {
           const auto presentStarted = PresentClock::now();
           wgpu::Status presentStatus;
+#ifdef __EMSCRIPTEN__
+          {
+            // wgpuSurfacePresent is unsupported on the web: the canvas is presented implicitly
+            // when the task yields to the browser event loop, so suspend via JSPI for a moment.
+            presentStatus = wgpu::Status::Success;
+            emscripten_sleep(0);
+          }
+#else
           {
             std::lock_guard submitLock(g_queueSubmitMutex);
             presentStatus = g_surface.Present();
           }
+#endif
           presentDuration = std::chrono::duration_cast<std::chrono::nanoseconds>(
               PresentClock::now() - presentStarted);
           if (presentStatus == wgpu::Status::Success) {
@@ -1542,7 +1560,13 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
 
 // Phase 3: hand the encoded group to whoever owns presentation.
 void publish_presentations(std::vector<PresentationJob>&& presentationJobs, bool interpolationActive) {
-#if defined(__APPLE__)
+#if defined(__EMSCRIPTEN__)
+  (void)interpolationActive;
+  // No presenter thread on the web: WebGPU is only usable from the rendering thread.
+  for (const auto& job : presentationJobs) {
+    present_presentation_job(job);
+  }
+#elif defined(__APPLE__)
   (void)interpolationActive;
   // Presenting reaches SDL/AppKit, whose window operations must stay on the
   // main thread. Interpolation normally starts the presenter worker, so keep

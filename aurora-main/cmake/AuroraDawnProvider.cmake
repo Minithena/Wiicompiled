@@ -1,5 +1,26 @@
 include_guard(GLOBAL)
 
+# Emscripten: WebGPU comes from the emdawnwebgpu port (browser WebGPU behind Dawn-flavoured
+# headers). No Dawn native is built. Ported from caribbeanwebdev/aurora (MIT).
+if (EMSCRIPTEN)
+  if (NOT TARGET webgpu_dawn)
+    message(STATUS "aurora: Using emdawnwebgpu port for WebGPU (Emscripten)")
+    add_library(webgpu_dawn INTERFACE)
+    target_compile_options(webgpu_dawn INTERFACE "--use-port=emdawnwebgpu")
+    target_link_options(webgpu_dawn INTERFACE "--use-port=emdawnwebgpu")
+  endif ()
+  if (NOT TARGET dawn::webgpu_dawn)
+    add_library(dawn::webgpu_dawn ALIAS webgpu_dawn)
+  endif ()
+  if (NOT TARGET dawn::dawncpp_headers)
+    add_library(dawn_dawncpp_headers INTERFACE)
+    target_link_libraries(dawn_dawncpp_headers INTERFACE webgpu_dawn)
+    add_library(dawn::dawncpp_headers ALIAS dawn_dawncpp_headers)
+  endif ()
+  set(AURORA_DAWN_IS_SHARED FALSE)
+  return()
+endif ()
+
 # Resolve Dawn/WebGPU dependency based on AURORA_DAWN_PROVIDER and AURORA_DAWN_LINKAGE.
 #
 # After this module runs:

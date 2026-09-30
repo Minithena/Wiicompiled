@@ -349,11 +349,19 @@ const AuroraEvent* poll_events() {
   // Clear out the previous scroll values to prevent ghost input
   input::set_mouse_scroll(0, 0);
   if (is_paused()) {
+#ifdef __EMSCRIPTEN__
+    // Don't block the proxied main thread indefinitely; keep yielding so browser
+    // events (focus, resize) can unpause us.
+    if (SDL_WaitEventTimeout(&event, 100)) {
+      process_event(event);
+    }
+#else
     if (SDL_WaitEvent(&event)) {
       process_event(event);
     } else {
       Log.warn("SDL_WaitEvent failed: {}", SDL_GetError());
     }
+#endif
   }
   while (SDL_PollEvent(&event)) {
     process_event(event);

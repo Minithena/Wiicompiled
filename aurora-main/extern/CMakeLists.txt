@@ -91,7 +91,7 @@ endif ()
 
 # fmt 11.1 drops its libc++ transitive includes but still calls malloc/free without <cstdlib>.
 # Force the missing header for fmt and its consumers until the pinned release is updated.
-if (MINGW AND TARGET fmt)
+if ((MINGW OR EMSCRIPTEN) AND TARGET fmt)
   target_compile_options(fmt PUBLIC
     $<$<COMPILE_LANGUAGE:CXX>:-include>
     $<$<COMPILE_LANGUAGE:CXX>:cstdlib>)
@@ -205,11 +205,25 @@ if (AURORA_ENABLE_GX)
     )
     target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR})
 
+    if (EMSCRIPTEN)
+      # imgui 1.91.9b rejects IMGUI_IMPL_WEBGPU_BACKEND_DAWN under __EMSCRIPTEN__ because it
+      # predates emdawnwebgpu, which provides the Dawn-flavoured headers, so the DAWN path is
+      # the right one on the web. Neutralise only that guard in a generated copy.
+      file(READ ${imgui_SOURCE_DIR}/backends/imgui_impl_wgpu.cpp _aurora_imgui_wgpu_src)
+      string(REPLACE "#if defined(IMGUI_IMPL_WEBGPU_BACKEND_DAWN) || defined(IMGUI_IMPL_WEBGPU_BACKEND_WGPU)\n    #error neither"
+                     "#if 0\n    #error neither" _aurora_imgui_wgpu_src "${_aurora_imgui_wgpu_src}")
+      file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/imgui_impl_wgpu_emdawn.cpp "${_aurora_imgui_wgpu_src}")
+      set(_aurora_imgui_wgpu_cpp ${CMAKE_CURRENT_BINARY_DIR}/imgui_impl_wgpu_emdawn.cpp)
+      unset(_aurora_imgui_wgpu_src)
+    else ()
+      set(_aurora_imgui_wgpu_cpp ${imgui_SOURCE_DIR}/backends/imgui_impl_wgpu.cpp)
+    endif ()
     add_library(imgui_backends STATIC
       ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
       ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlrenderer3.cpp
-      ${imgui_SOURCE_DIR}/backends/imgui_impl_wgpu.cpp
+      ${_aurora_imgui_wgpu_cpp}
     )
+    target_include_directories(imgui_backends PRIVATE ${imgui_SOURCE_DIR}/backends)
     target_compile_definitions(imgui_backends PRIVATE IMGUI_IMPL_WEBGPU_BACKEND_DAWN)
     target_link_libraries(imgui_backends PRIVATE imgui ${AURORA_SDL3_TARGET} dawn::webgpu_dawn)
     target_link_libraries(imgui PUBLIC imgui_backends)

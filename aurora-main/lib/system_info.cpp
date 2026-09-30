@@ -35,6 +35,25 @@ typedef LONG NTSTATUS, *PNTSTATUS;
 extern "C" NTSYSAPI NTSTATUS NTAPI RtlGetVersion(PRTL_OSVERSIONINFOEXW lpVersionInformation);
 #elif __APPLE__
 #include "sys/sysctl.h"
+#elif defined(__EMSCRIPTEN__)
+#include <emscripten/heap.h>
+#elif defined(__EMSCRIPTEN__)
+
+std::string GetCpuModel() {
+  return "wasm32";
+}
+
+uint64_t GetMemoryAmount() {
+  return emscripten_get_heap_max();
+}
+
+std::string GetOSVersion() {
+  return "Browser/Emscripten";
+}
+
+void LogMisc() {
+  // Nada.
+}
 #elif linux
 #include <ranges>
 #include <fstream>

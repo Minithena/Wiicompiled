@@ -1169,8 +1169,15 @@ void initialize_pipeline_cache() {
   g_pipelineThreadEnd = false;
   g_activeBackgroundPipelineWorkers = 0;
 
-  if (webgpu::g_backendType == wgpu::BackendType::OpenGL || webgpu::g_backendType == wgpu::BackendType::OpenGLES ||
-      webgpu::g_backendType == wgpu::BackendType::WebGPU) {
+#ifdef __EMSCRIPTEN__
+  // Browser WebGPU objects cannot be used from other workers, so pipelines are always created
+  // synchronously on the rendering thread: zero compile workers, no deferral.
+  constexpr bool forceInlinePipelines = true;
+#else
+  constexpr bool forceInlinePipelines = false;
+#endif
+  if (forceInlinePipelines || webgpu::g_backendType == wgpu::BackendType::OpenGL ||
+      webgpu::g_backendType == wgpu::BackendType::OpenGLES || webgpu::g_backendType == wgpu::BackendType::WebGPU) {
     g_hasPipelineThread = false;
   } else {
     g_hasPipelineThread = true;
@@ -1183,10 +1190,16 @@ void initialize_pipeline_cache() {
              workerCount, MaxBackgroundPipelineWorkers);
   }
 
+#ifdef __EMSCRIPTEN__
+  // The SQLite/zstd on-disk pipeline cache (and its writer thread) is disabled on the web for now:
+  // pipelines are recompiled by the browser each session. With no DB open, every cache write is a no-op.
+  g_pipelineCacheBroken = true;
+#else
   load_pipeline_cache();
   if (!g_pipelineCacheBroken) {
     start_pipeline_cache_writer();
   }
+#endif
 }
 
 void shutdown_pipeline_cache() {

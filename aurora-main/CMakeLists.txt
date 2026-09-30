@@ -18,6 +18,16 @@ set(AURORA_SDL3_VERSION "3.4.4" CACHE STRING "SDL3 version tag (https://github.c
 set(AURORA_NOD_VERSION "v2.0.0-alpha.8" CACHE STRING "nod version tag (https://github.com/encounter/nod/releases)")
 set(AURORA_LIBUSB_VERSION "1.0.30" CACHE STRING "libusb version tag (https://github.com/libusb/libusb/releases)")
 
+# Emscripten (WebAssembly): every object in the final link must agree on threads and the
+# exception model, so apply them to aurora and all of its third-party dependencies.
+# Ported from caribbeanwebdev/aurora (MIT); flags mirror the Dusklight web port.
+if (EMSCRIPTEN)
+  add_compile_options(-pthread -fwasm-exceptions -sSUPPORT_LONGJMP=wasm)
+  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include cstdlib>")
+  # Web builds have no nod/Rust; the DVD component is unavailable (WiiCompiled uses its own DVD HLE).
+  set(AURORA_ENABLE_DVD OFF CACHE BOOL "" FORCE)
+endif ()
+
 # Platform-specific defaults
 if (CMAKE_CROSSCOMPILING)
   # Cross-compiling: vendor everything, don't use system packages
