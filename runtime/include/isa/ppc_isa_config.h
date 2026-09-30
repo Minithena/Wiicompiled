@@ -8,6 +8,9 @@
 #include <immintrin.h>
 #elif defined(__aarch64__)
 #include <arm_neon.h>
+#elif defined(__wasm__)
+// WebAssembly (Emscripten): no intrinsics header needed; the ISA helpers use clang vector
+// extensions and portable C++ (see the __wasm__ branches in ppc_isa_float.h).
 #else
 #error "ppc_isa_config.h has no SIMD intrinsics header for this architecture"
 #endif

@@ -21,6 +21,20 @@ inline constexpr uint32_t kMkwFpControlFlushToZeroBits = (1u << 15) | (1u << 6);
 // inputs and outputs - actually a cleaner match to the "flush everything" trade above than x86's
 // two-bit combo, not an extra deviation.
 inline constexpr uint32_t kMkwFpControlFlushToZeroBits = (1u << 24); // FZ
+#elif defined(__wasm__)
+// WebAssembly has no FP control register: no flush-to-zero/denormals-are-zero mode and only
+// round-to-nearest-even. The "host FP control register" is therefore a thread-local VIRTUAL
+// register that merely records state (so CpuContextScope save/restore and the NI mirror below
+// stay coherent). Not reproducible on wasm:
+//   (1) hardware FTZ/DAZ for FPSCR[NI]: raw arithmetic results are never flushed; only the
+//       software checks against g_mkwHostNiActive / g_mkwNiFlushThreshold (see ppc_isa_float.h)
+//       flush.
+//   (2) FPSCR[RN] non-nearest rounding. (No architecture in this runtime maps RN onto the host
+//       rounding mode anyway - there is no fesetround/MXCSR.RC/FPCR.RMode write - so normal
+//       gameplay does not depend on it.)
+// Bit 24 is used for the virtual flush-to-zero flag for parity with AArch64's FZ.
+inline constexpr uint32_t kMkwFpControlFlushToZeroBits = (1u << 24);
+inline thread_local uint32_t g_mkwWasmVirtualFpControl = 0;
 #else
 #error "ppc_isa_fpenv.h has no host FP control register mapping for this architecture"
 #endif
@@ -44,6 +58,8 @@ inline uint32_t MkwGetHostFpControl() noexcept
     uint64_t fpcr = 0;
     __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
     return static_cast<uint32_t>(fpcr);
+#elif defined(__wasm__)
+    return g_mkwWasmVirtualFpControl;
 #endif
 }
 
@@ -58,6 +74,8 @@ inline void MkwSetHostFpControl(uint32_t value) noexcept
     __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
     fpcr = (fpcr & ~static_cast<uint64_t>(0xFFFFFFFFu)) | value;
     __asm__ __volatile__("msr fpcr, %0" :: "r"(fpcr));
+#elif defined(__wasm__)
+    g_mkwWasmVirtualFpControl = value;
 #endif
 }
 
