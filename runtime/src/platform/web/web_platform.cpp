@@ -10,6 +10,7 @@
 #if defined(__EMSCRIPTEN__)
 
 #include "web_platform.h"
+#include "web_performance.h"
 
 #include "fiber_manager.h"
 #include "guest_flat_memory.h"
@@ -178,6 +179,7 @@ void StartWatchdog() {
     const uint32_t* translatedAddress = &RecompMod::g_currentTranslatedExecutionAddress;
     std::thread([translatedAddress] {
         uint32_t lastSwitches = 0;
+        double previousReport = WebPerformance::Now();
         for (;;) {
             std::this_thread::sleep_for(std::chrono::seconds(3));
             const uint32_t switches = HostContext::g_webContextSwitches.load(std::memory_order_relaxed);
@@ -193,6 +195,11 @@ void StartWatchdog() {
                         Fiber::GuestFiberManager::GetCurrentGuestThreadForWatchdog(), runningThread,
                         *reinterpret_cast<const volatile uint32_t*>(translatedAddress));
             lastSwitches = switches;
+            if (WebPerformance::Enabled()) {
+                const double now = WebPerformance::Now();
+                WebPerformance::Report(now - previousReport);
+                previousReport = now;
+            }
         }
     }).detach();
 }

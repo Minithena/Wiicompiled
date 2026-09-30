@@ -246,6 +246,7 @@
       if (params.has('resetsave')) ENV.MKW_WEB_RESET_SAVE = '1';
       if (roomUrl) ENV.MKW_WEB_ROOM = roomUrl;
       if (params.has('netlog')) ENV.MKW_WEB_NETLOG = '1';
+      if (params.has('log')) ENV.MKW_WEB_PERF = '1';
     }],
     print: (text) => console.log(text),
     printErr: (text) => console.error(text),

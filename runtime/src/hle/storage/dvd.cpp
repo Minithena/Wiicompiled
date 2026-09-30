@@ -1,6 +1,7 @@
 ﻿#include "hle_stubs.h"
 #include "isa/big_endian.h"
 #include "hle/dvd_contract.h"
+#include "platform/web/web_performance.h"
 #include "hle/runtime_parse_helpers.h"
 #include "memory.h"
 
@@ -904,10 +905,16 @@ extern "C" int32_t DVDReadPrio_8015E834(uint32_t fileInfoPtr, uint32_t bufferPtr
 
     std::vector<uint8_t> tempBuf;
     DvdReadContract::HostReadFailure failure;
+#ifdef __EMSCRIPTEN__
+    const double readStarted = WebPerformance::Enabled() ? WebPerformance::Now() : 0.0;
+#endif
     if (!DvdReadContract::ReadExact(entry.hostPath, uOffset, uLength, tempBuf, failure)) {
         return DvdReadFatal(fileInfoPtr, HostPathText(entry.hostPath), offset, uLength,
                             DvdReadContract::Describe(failure));
     }
+#ifdef __EMSCRIPTEN__
+    if (readStarted != 0.0) WebPerformance::RecordDiscRead(WebPerformance::Now() - readStarted);
+#endif
 
     CopyToGuestAsDma(bufferPtr, tempBuf.data(), uLength);
 
@@ -1117,4 +1124,3 @@ PPC_NATIVE_OVERRIDE(801643FC, DVDCheckDevice_801643FC, int32_t, (), ());
 
 extern "C" int32_t DVDLowClearCoverInterrupt_80166964(uint32_t cb) { return 1; }
 PPC_NATIVE_OVERRIDE(80166964, DVDLowClearCoverInterrupt_80166964, int32_t, (uint32_t cb), (cb));
-

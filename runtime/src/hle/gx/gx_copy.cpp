@@ -2,6 +2,7 @@
 #include "gx_internal.h"
 
 #include "settings_overlay.h"
+#include "platform/web/web_performance.h"
 
 #include <dolphin/gx/GXAurora.h>
 
@@ -112,11 +113,22 @@ PPC_NATIVE_OVERRIDE_VOID(8016fc24, GX__SetDispCopyGamma_8016fc24, (uint32_t g), 
 // ============================================================================
 
 extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
+#ifdef __EMSCRIPTEN__
+    const bool measure = WebPerformance::Enabled();
+    static double previousStart = 0.0, previousEnd = 0.0;
+    const double start = measure ? WebPerformance::Now() : 0.0;
+#endif
     EnsureAuroraFrameActive();
     // GX copies are FIFO-ordered on hardware. Drain submitted draws before
     // resolving the EFB so high-level copies see the same contents.
     GXDrawDone();
+#ifdef __EMSCRIPTEN__
+    const double drained = measure ? WebPerformance::Now() : 0.0;
+#endif
     GXCopyDisp(GuestToHostPtr(da), (GXBool)c);
+#ifdef __EMSCRIPTEN__
+    const double copied = measure ? WebPerformance::Now() : 0.0;
+#endif
     // No second GXDrawDone here: the frame-worker wait below is for the DONE
     // phase, which strictly subsumes the drain this call would perform.
     ++g_gxFrameCount;
@@ -125,10 +137,27 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
     // (not the cheaper SEALED phase GXDrawDone waits for) because ImGui's draw lists, owned by
     // Aurora's render worker, replay during encode; aurora_end_frame would join here anyway.
     aurora_wait_for_frame_worker();
+#ifdef __EMSCRIPTEN__
+    const double waited = measure ? WebPerformance::Now() : 0.0;
+#endif
     settings_overlay::Draw();
+#ifdef __EMSCRIPTEN__
+    const double overlay = measure ? WebPerformance::Now() : 0.0;
+#endif
     // Seal, pace to the VI retrace boundary (Aurora renders the sealed frame
     // during the wait), and pre-warm the next frame.
     VI_HLE_PresentFrame(/*presentedXfb=*/true, /*paceToRetrace=*/true);
+#ifdef __EMSCRIPTEN__
+    if (measure) {
+        const double end = WebPerformance::Now();
+        if (previousStart != 0.0) {
+            WebPerformance::RecordFrame(start - previousStart, start - previousEnd,
+                drained - start, copied - drained, waited - copied, overlay - waited, end - overlay);
+        }
+        previousStart = start;
+        previousEnd = end;
+    }
+#endif
 }
 
 PPC_NATIVE_OVERRIDE_VOID(8016fc38, GX__CopyDisp_8016fc38, (uint32_t da, uint32_t c), (da, c));
