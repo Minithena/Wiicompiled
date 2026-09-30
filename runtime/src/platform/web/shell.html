@@ -5,29 +5,99 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>WiiCompiled</title>
 <style>
-  :root { color-scheme: dark; }
-  html, body { margin: 0; height: 100%; background: #000; color: #ddd;
-               font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
-  /* The game renders at its own size; the element scales to fit the window, letterboxed. */
-  #canvas { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain;
+  :root {
+    color-scheme: dark;
+    --bg: #000; --panel: #111316; --line: #25282d; --text: #e6e6e6; --muted: #9aa0a8;
+    --key-bg: #1d2025; --key-line: #3a3f47; --accent: #e60012;
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+               font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  #layout { display: flex; height: 100%; }
+  /* The game renders at its own size; the element scales to fit the space left, letterboxed. */
+  #stage { position: relative; flex: 1; min-width: 0; }
+  #canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
             display: block; outline: none; }
-  #overlay { position: fixed; inset: 0; display: flex; flex-direction: column; gap: 14px;
-             align-items: center; justify-content: center; background: #000c; }
+  /* Decorative letterbox backdrop: original tiled bunny racers, dim on near-black. */
+  #stage, #canvas { background-color: #0b0c10; background-repeat: repeat; background-size: 200px 200px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200' viewBox='0 0 200 200'%3E%3Cg opacity='.2'%3E%3Cdefs%3E%3Cpattern id='c' width='6' height='6' patternUnits='userSpaceOnUse'%3E%3Crect width='6' height='6' fill='%23ddd'/%3E%3Crect width='3' height='3' fill='%23222'/%3E%3Crect x='3' y='3' width='3' height='3' fill='%23222'/%3E%3C/pattern%3E%3C/defs%3E%3Cg%3E%3Crect x='18' y='26' width='3' height='24' fill='%239a8f80'/%3E%3Crect x='21' y='26' width='22' height='14' fill='url(%23c)'/%3E%3C/g%3E%3Cg transform='translate(6 88)'%3E%3Cellipse cx='34' cy='86' rx='40' ry='5' fill='%23000' opacity='.4'/%3E%3Cpath d='M6 66q0-14 14-14h40q10 0 12 10l4 6v6H6z' fill='%23b8564a'/%3E%3Crect x='14' y='62' width='50' height='4' fill='%23e0c070'/%3E%3Ccircle cx='20' cy='74' r='10' fill='%23333'/%3E%3Ccircle cx='20' cy='74' r='4' fill='%23999'/%3E%3Ccircle cx='60' cy='74' r='10' fill='%23333'/%3E%3Ccircle cx='60' cy='74' r='4' fill='%23999'/%3E%3Cpath d='M26 52q-4-14 0-24 6-6 10 0 2 12-2 24z' fill='%23b8865a'/%3E%3Cpath d='M38 52q2-14 10-24 6-2 6 4 0 12-8 20z' fill='%23b8865a'/%3E%3Cpath d='M30 46q-2-8 0-14 3-2 4 2 0 6-1 12z' fill='%23d9a9a0'/%3E%3Ccircle cx='38' cy='50' r='14' fill='%23c9965e'/%3E%3Cpath d='M22 48q2-18 16-18t16 18z' fill='%234a6fa5'/%3E%3Crect x='26' y='44' width='26' height='9' rx='4' fill='%231d2a3a'/%3E%3Cpath d='M29 46h10' stroke='%238fb3d9' stroke-width='2'/%3E%3Ccircle cx='31' cy='58' r='3' fill='%23e08a80'/%3E%3Ccircle cx='48' cy='58' r='3' fill='%23e08a80'/%3E%3Cpath d='M34 59q4 5 9 0z' fill='%237a2f2f'/%3E%3Ccircle cx='40' cy='56' r='2' fill='%235a3a2a'/%3E%3Ccircle cx='62' cy='62' r='7' fill='%23e0c070'/%3E%3Ctext x='62' y='65' font-size='9' font-family='Arial' font-weight='bold' text-anchor='middle' fill='%23333'%3E7%3C/text%3E%3C/g%3E%3Cg transform='translate(112 6)'%3E%3Crect x='42' y='4' width='3' height='50' fill='%239a8f80'/%3E%3Crect x='45' y='4' width='26' height='18' fill='url(%23c)' transform='skewY(-6 45 4)'/%3E%3Cpath d='M14 94q-4-26 10-34h20q14 8 10 34z' fill='%235a8f7a'/%3E%3Crect x='22' y='70' width='4' height='22' fill='%23e8e0c8'/%3E%3Crect x='42' y='70' width='4' height='22' fill='%23e8e0c8'/%3E%3Ccircle cx='34' cy='80' r='7' fill='%23e0c070'/%3E%3Ctext x='34' y='83' font-size='9' font-family='Arial' font-weight='bold' text-anchor='middle' fill='%23333'%3E3%3C/text%3E%3Cpath d='M44 66q8-6 0-22' stroke='%238a93a0' stroke-width='7' fill='none' stroke-linecap='round'/%3E%3Cellipse cx='22' cy='14' rx='5.5' ry='15' fill='%238a93a0' transform='rotate(-8 22 14)'/%3E%3Cpath d='M46 24q14 4 16 18 0 6-6 4-6-4-10-14z' fill='%238a93a0'/%3E%3Cpath d='M22 14q2 8 0 14' stroke='%23c9a7b0' stroke-width='3' fill='none'/%3E%3Ccircle cx='34' cy='44' r='16' fill='%239aa3b0'/%3E%3Cellipse cx='34' cy='49' rx='8' ry='6' fill='%23c7cdd6'/%3E%3Cellipse cx='28' cy='42' rx='2.6' ry='3.4' fill='%232b2f3a'/%3E%3Cellipse cx='41' cy='42' rx='2.6' ry='3.4' fill='%232b2f3a'/%3E%3Ccircle cx='29' cy='41' r='1' fill='%23ddd'/%3E%3Ccircle cx='42' cy='41' r='1' fill='%23ddd'/%3E%3Ccircle cx='24' cy='49' r='3' fill='%23d98a9a'/%3E%3Ccircle cx='44' cy='49' r='3' fill='%23d98a9a'/%3E%3Cpath d='M29 50q5 7 10 0z' fill='%237a2f3f'/%3E%3Cpath d='M32 47h4l-2 2z' fill='%236a5560'/%3E%3C/g%3E%3Cg transform='translate(106 104)'%3E%3Cpath d='M14 94q-2-22 14-26h20q16 4 14 26z' fill='%233f5f8f'/%3E%3Crect x='36' y='70' width='4' height='24' fill='%23e8e0c8'/%3E%3Ccircle cx='26' cy='82' r='6' fill='%23e0c070'/%3E%3Ctext x='26' y='85' font-size='8' font-family='Arial' font-weight='bold' text-anchor='middle' fill='%23333'%3E1%3C/text%3E%3Cpath d='M52 72q10-6 12-24' stroke='%233f5f8f' stroke-width='8' fill='none' stroke-linecap='round'/%3E%3Ccircle cx='64' cy='46' r='4.5' fill='%23e8dcb8'/%3E%3Cpath d='M57 40h14l-2 10q-5 3-10 0z' fill='%23d4ad45'/%3E%3Cpath d='M57 42q-6 0-4 6M71 42q6 0 4 6' stroke='%23d4ad45' stroke-width='2' fill='none'/%3E%3Cpath d='M60 49h8v3h-8z' fill='%23d4ad45'/%3E%3Cellipse cx='30' cy='26' rx='5' ry='14' fill='%23e8dcb8' transform='rotate(-6 30 26)'/%3E%3Cellipse cx='46' cy='26' rx='5' ry='14' fill='%23e8dcb8' transform='rotate(6 46 26)'/%3E%3Cpath d='M30 18v16M46 18v16' stroke='%23d9a9a0' stroke-width='3'/%3E%3Ccircle cx='38' cy='54' r='15' fill='%23efe3bf'/%3E%3Cpath d='M23 50q2-15 15-15t15 15z' fill='%23a35a4a'/%3E%3Crect x='26' y='46' width='24' height='3' rx='1.5' fill='%233a2a30'/%3E%3Cpath d='M29 54q2-3 5 0M42 54q2-3 5 0' stroke='%234a3a3a' stroke-width='2' fill='none'/%3E%3Ccircle cx='29' cy='60' r='3' fill='%23e8a0a0'/%3E%3Ccircle cx='47' cy='60' r='3' fill='%23e8a0a0'/%3E%3Cpath d='M33 60q5 8 10 0z' fill='%238a3a3a'/%3E%3C/g%3E%3Cpath d='M186 74l2 5 5 1-4 4 1 5-4-3-4 3 1-5-4-4 5-1z' fill='%23d4ad45'/%3E%3Cpath d='M96 14l2 5 5 1-4 4 1 5-4-3-4 3 1-5-4-4 5-1z' fill='%23d4ad45'/%3E%3Cpath d='M178 112l2 5 5 1-4 4 1 5-4-3-4 3 1-5-4-4 5-1z' fill='%23d4ad45'/%3E%3Cg%3E%3Ccircle cx='189' cy='166' r='9' fill='%23333'/%3E%3Ccircle cx='189' cy='166' r='4' fill='%23777'/%3E%3Ccircle cx='189' cy='186' r='9' fill='%23333'/%3E%3Ccircle cx='189' cy='186' r='4' fill='%23777'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E"); }
+  /* Optional local picture: put game/background.jpg next to the page (not part of this
+     repository) and it replaces the tiles. */
+  .custom-background #stage, .custom-background #canvas {
+    background: linear-gradient(#0008, #0008), url("game/background.jpg") center / cover no-repeat #0b0c10; }
+  #controls { width: 270px; flex: none; overflow-y: auto; background: var(--panel);
+              border-left: 1px solid var(--line); padding: 16px 16px 24px; box-sizing: border-box; }
+  #controls[hidden] { display: none; }
+  #controls h2 { font-size: 15px; margin: 0; }
+  #controls h3 { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
+                 margin: 18px 0 8px; font-weight: 600; }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 7px 12px; margin: 0; align-items: center; }
+  dt { display: flex; gap: 4px; flex-wrap: wrap; }
+  dd { margin: 0; color: var(--muted); }
+  kbd { font: 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text);
+        background: var(--key-bg); border: 1px solid var(--key-line); border-bottom-width: 2px;
+        border-radius: 5px; padding: 3px 6px; white-space: nowrap; }
+  .note { color: var(--muted); font-size: 12px; margin: 18px 0 0; }
+  button.link { font: inherit; font-size: 12px; color: var(--muted); background: none; border: 1px solid var(--line);
+                border-radius: 6px; padding: 4px 8px; cursor: pointer; }
+  button.link:hover { color: var(--text); }
+  #show-controls { position: absolute; top: 12px; right: 12px; z-index: 1; background: #000a; }
+  #show-controls[hidden] { display: none; }
+  #overlay { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 14px;
+             align-items: center; justify-content: center; background: #000c; z-index: 2; }
   #overlay[hidden] { display: none; }
-  #start { font: inherit; font-size: 18px; padding: 12px 28px; border-radius: 999px; border: 0;
-           background: #e60012; color: #fff; cursor: pointer; }
+  #start, #reload { font: inherit; font-size: 18px; padding: 12px 28px; border-radius: 999px; border: 0;
+                    background: var(--accent); color: #fff; cursor: pointer; }
   #start:disabled { background: #555; cursor: default; }
-  #status { min-height: 1.4em; color: #aaa; text-align: center; padding: 0 16px; }
-  #help { color: #888; font-size: 13px; text-align: center; padding: 0 16px; }
+  #reload[hidden], #start[hidden] { display: none; }
+  #status { min-height: 1.4em; color: var(--muted); text-align: center; padding: 0 16px; max-width: 640px; }
+  /* Narrow windows: controls go below the game. */
+  @media (max-width: 760px) {
+    #layout { flex-direction: column; }
+    #controls { width: auto; max-height: 40%; border-left: 0; border-top: 1px solid var(--line); }
+  }
 </style>
 </head>
 <body>
-<canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
-<div id="overlay">
-  <button id="start" disabled>Loading…</button>
-  <div id="status"></div>
-  <div id="help">Keyboard: WASD steer · left click accelerate/confirm · right click drift ·
-    Shift item · Space back · Enter pause · F10 settings</div>
+<div id="layout">
+  <div id="stage">
+    <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+    <button id="show-controls" class="link" hidden>Show controls</button>
+    <div id="overlay">
+      <button id="start" disabled>Loading…</button>
+      <button id="reload" hidden onclick="location.reload()">Reload</button>
+      <div id="status"></div>
+    </div>
+  </div>
+  <aside id="controls" aria-label="Controls">
+    <div class="head">
+      <h2>Controls</h2>
+      <button id="hide-controls" class="link">Hide</button>
+    </div>
+    <h3>Driving</h3>
+    <dl>
+      <dt><kbd>A</kbd><kbd>D</kbd></dt><dd>Steer</dd>
+      <dt><kbd>Left click</kbd></dt><dd>Accelerate</dd>
+      <dt><kbd>Space</kbd></dt><dd>Brake / reverse</dd>
+      <dt><kbd>Right click</kbd></dt><dd>Drift, hop, trick</dd>
+      <dt><kbd>Shift</kbd></dt><dd>Use item</dd>
+      <dt><kbd>W</kbd><kbd>S</kbd></dt><dd>Aim item forward / back</dd>
+      <dt><kbd>Enter</kbd></dt><dd>Pause</dd>
+    </dl>
+    <h3>Menus</h3>
+    <dl>
+      <dt><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></dt><dd>Move</dd>
+      <dt><kbd>Left click</kbd></dt><dd>Confirm (A)</dd>
+      <dt><kbd>Space</kbd></dt><dd>Back (B)</dd>
+      <dt><kbd>Arrows</kbd></dt><dd>D-pad</dd>
+    </dl>
+    <h3>Game</h3>
+    <dl>
+      <dt><kbd>F10</kbd></dt><dd>Settings and key bindings</dd>
+      <dt><kbd>\</kbd></dt><dd>Mute / unmute</dd>
+    </dl>
+    <p class="note">A game controller works too. On a Mac keyboard, press <kbd>fn</kbd>+<kbd>F10</kbd>.</p>
+  </aside>
 </div>
 <script>
   const params = new URLSearchParams(location.search);
@@ -75,6 +145,7 @@
     onAbort: (what) => {
       document.getElementById('overlay').hidden = false;
       startButton.hidden = true;
+      document.getElementById('reload').hidden = false;
       statusEl.textContent = 'The game stopped: ' + what + ' (details in the browser console).';
     },
   };
@@ -83,6 +154,26 @@
     startButton.hidden = true;
     statusEl.textContent = 'This browser is missing: ' + missing.join(', ') + '.';
   }
+
+  {
+    const picture = new Image();
+    picture.onload = () => document.body.classList.add('custom-background');
+    picture.src = 'game/background.jpg';
+  }
+
+  // The controls panel can be hidden; the choice is remembered in this browser.
+  const controlsPanel = document.getElementById('controls');
+  const showControls = document.getElementById('show-controls');
+  const setControlsVisible = (visible) => {
+    controlsPanel.hidden = !visible;
+    showControls.hidden = visible;
+    try { localStorage.setItem('mkw-controls-hidden', visible ? '0' : '1'); } catch (e) {}
+  };
+  let controlsHidden = false;
+  try { controlsHidden = localStorage.getItem('mkw-controls-hidden') === '1'; } catch (e) {}
+  setControlsVisible(!controlsHidden);
+  document.getElementById('hide-controls').addEventListener('click', () => { setControlsVisible(false); Module.canvas.focus(); });
+  showControls.addEventListener('click', () => { setControlsVisible(true); Module.canvas.focus(); });
 
   // Browsers only start audio after a user gesture, so the game waits for this click.
   startButton.addEventListener('click', () => {

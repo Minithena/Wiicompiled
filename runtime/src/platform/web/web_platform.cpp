@@ -20,9 +20,12 @@
 #include <chrono>
 #include <thread>
 
+#include <emscripten/proxying.h>
 #include <emscripten/wasmfs.h>
+#include <pthread.h>
 
 #include <cerrno>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -90,7 +93,8 @@ void MountGame() {
         }
         files += line[0] == 'f';
     }
-    std::printf("[web] mounted %zu game files at %s\n", files, kGameMount);
+    std::printf("[web] mounted %zu game files at %s (game thread %p)\n", files, kGameMount,
+                reinterpret_cast<void*>(pthread_self()));
 
     // Seed the (in-memory) NAND with the save staged next to the disc, if any.
     const std::filesystem::path stagedSave = std::string(kGameMount) + "/save/rksys.dat";
@@ -129,6 +133,43 @@ void StartWatchdog() {
 }
 
 } // namespace WebPlatform
+
+// Replaces Emscripten's html5/callback.c forwarder (same symbol; the linker prefers this
+// definition). Browser events are queued to the thread that registered their handler; the stock
+// version asserts when that thread's mailbox is closed, which a window resize could trigger.
+// Log the dead target and drop the event instead.
+extern "C" {
+typedef bool (*mkw_event_callback)(int event_type, void* event_data, void* user_data);
+struct MkwCallbackArgs {
+    mkw_event_callback callback;
+    int eventType;
+    void* userData;
+    alignas(max_align_t) uint8_t eventData[];
+};
+
+static void MkwRunCallback(void* arg) {
+    auto* args = static_cast<MkwCallbackArgs*>(arg);
+    args->callback(args->eventType, args->eventData, args->userData);
+    std::free(arg);
+}
+
+void _emscripten_run_callback_on_thread(pthread_t target, mkw_event_callback callback, int eventType,
+                                        void* eventData, size_t eventDataSize, void* userData) {
+    auto* args = static_cast<MkwCallbackArgs*>(std::malloc(sizeof(MkwCallbackArgs) + eventDataSize));
+    args->callback = callback;
+    args->eventType = eventType;
+    args->userData = userData;
+    std::memcpy(args->eventData, eventData, eventDataSize);
+    if (!emscripten_proxy_async(emscripten_proxy_get_system_queue(), target, MkwRunCallback, args)) {
+        std::free(args);
+        static std::atomic<int> reported{0};
+        if (reported.fetch_add(1) < 8) {
+            std::fprintf(stderr, "[web] dropped browser event %d for exited thread %p\n", eventType,
+                         reinterpret_cast<void*>(target));
+        }
+    }
+}
+}
 
 // Configuration is read during static initialization, so the default Config.toml has to exist
 // before any other constructor runs. (The fetch mount cannot be created this early: constructors
