@@ -71,6 +71,10 @@
 #include <dolphin/gx/GXAurora.h>
 #include <dolphin/vi.h>
 
+#if defined(__EMSCRIPTEN__)
+#include "platform/web/web_platform.h"
+#endif
+
 // Defined in `runtime/src/hle/vi.cpp` (used by GX/VI HLE).
 extern std::atomic_bool g_auroraFrameActive;
 extern "C" int g_gxFrameCount;
@@ -401,6 +405,13 @@ std::string ReadInstalledSetupVersion() {
 }
 
 void InitializeProcessTranscript(int argc, char** argv) {
+#if defined(__EMSCRIPTEN__)
+    // stdout/stderr already go to the browser console; the pipe-and-reader-thread capture below
+    // would swallow them.
+    (void)argc;
+    (void)argv;
+    return;
+#endif
     auto& state = GetProcessTranscriptState();
     if (state.initialized.exchange(true, std::memory_order_acq_rel)) {
         return;
@@ -1521,6 +1532,21 @@ int RuntimeMain(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
+#if defined(__EMSCRIPTEN__)
+    // Every line should reach the browser console as it is written, not when a buffer fills.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
+    try {
+        WebPlatform::MountGame();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[web] start-up failed: %s\n", e.what());
+        return 1;
+    }
+    const int status = RuntimeMain(argc, argv);
+    std::fprintf(stderr, "[web] RuntimeMain returned %d\n", status);
+    return status;
+#else
     return RuntimeMain(argc, argv);
+#endif
 }
 extern "C" bool g_dynamicAspectRatioEnabled = false;

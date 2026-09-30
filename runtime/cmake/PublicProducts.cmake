@@ -18,7 +18,28 @@ if(EXISTS "${GUEST_SYMBOL_TABLE_FILE}")
 else()
     list(APPEND SOURCES "${MKW_RUNTIME_SOURCE_DIR}/cmake/guest_symbol_table_stub.cpp")
 endif()
-if(EXISTS "${DATA_INIT_BLOB_ASM}")
+if(EXISTS "${DATA_INIT_BLOB_ASM}" AND MKW_PLATFORM_WEB)
+    # The translator writes the blobs as Mach-O/ELF assembly (.section/.incbin), which the
+    # WebAssembly assembler does not accept. Re-express each symbol as a C++ array filled by
+    # #embed from the same .bin file.
+    file(STRINGS "${DATA_INIT_BLOB_ASM}" MKW_BLOB_LINES REGEX "^(\\.globl|\\.incbin) ")
+    set(MKW_BLOB_CPP "// Generated at configure time from data_sections_init_blobs.S for WebAssembly.\n#include <cstdint>\n")
+    foreach(line IN LISTS MKW_BLOB_LINES)
+        if(line MATCHES "^\\.globl _(.+)$")
+            set(MKW_BLOB_SYMBOL "${CMAKE_MATCH_1}")
+        elseif(line MATCHES "^\\.incbin \"(.+)\"$")
+            string(APPEND MKW_BLOB_CPP
+                "extern \"C\" alignas(16) const uint8_t ${MKW_BLOB_SYMBOL}[] = {\n#embed \"${CMAKE_MATCH_1}\"\n};\n")
+        endif()
+    endforeach()
+    set(MKW_BLOB_CPP_FILE "${CMAKE_BINARY_DIR}/data_sections_init_blobs_web.cpp")
+    file(CONFIGURE OUTPUT "${MKW_BLOB_CPP_FILE}" CONTENT "${MKW_BLOB_CPP}" @ONLY)
+    set_source_files_properties("${MKW_BLOB_CPP_FILE}" PROPERTIES
+        SKIP_UNITY_BUILD_INCLUSION ON SKIP_PRECOMPILE_HEADERS ON
+        COMPILE_OPTIONS "-Wno-c23-extensions"
+        OBJECT_DEPENDS "${DATA_INIT_BLOB_ASM}")
+    list(APPEND SOURCES "${MKW_BLOB_CPP_FILE}")
+elseif(EXISTS "${DATA_INIT_BLOB_ASM}")
     enable_language(ASM)
     set_source_files_properties("${DATA_INIT_BLOB_ASM}" PROPERTIES LANGUAGE ASM SKIP_UNITY_BUILD_INCLUSION ON)
     list(APPEND SOURCES "${DATA_INIT_BLOB_ASM}")
@@ -266,10 +287,11 @@ function(mkw_configure_product target)
         target_link_options(${target} PRIVATE
             --use-port=emdawnwebgpu -sJSPI -sJSPI_EXPORTS=mkw_fiber_entry -sPROXY_TO_PTHREAD
             "--js-library=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/mkw_fibers.js"
+            "--js-library=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/mkw_fetchfs.js"
             -sOFFSCREENCANVAS_SUPPORT "-sOFFSCREENCANVASES_TO_PTHREAD=#canvas"
             -sALLOW_MEMORY_GROWTH -sINITIAL_MEMORY=536870912 -sMAXIMUM_MEMORY=4294967296
             -sSTACK_SIZE=8388608 -sDEFAULT_PTHREAD_STACK_SIZE=2097152 -sPTHREAD_POOL_SIZE=24
-            -sWASMFS -sFORCE_FILESYSTEM -sEXIT_RUNTIME=0 -sASSERTIONS=1
+            -sWASMFS -sFORCE_FILESYSTEM -sEXIT_RUNTIME=0 -sASSERTIONS=1 --profiling-funcs
             "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/wii@/app/wii_bootstrap"
             "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/dsp/dsp_coef.bin@/app/dsp_coef.bin")
         return()

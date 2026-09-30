@@ -5,6 +5,7 @@
 #include <chrono>
 #include <ctime>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -200,6 +201,11 @@ inline bool Ensure(const std::filesystem::path& root, std::string& error,
     if (written) {
 #ifdef _WIN32
         published = MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH) != 0;
+#elif defined(__EMSCRIPTEN__)
+        // WASMFS has no hard links. One browser tab is the only writer, so a rename that
+        // refuses an existing target gives the same publish-once result.
+        published = !std::filesystem::exists(path, ec) &&
+                    std::rename(temporary.c_str(), path.c_str()) == 0;
 #else
         published = ::link(temporary.c_str(), path.c_str()) == 0;
 #endif
