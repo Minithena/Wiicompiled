@@ -1446,7 +1446,37 @@ void EnableKeyboardByDefault() noexcept {
     ApplyWasdPreset(0);
 }
 
+namespace {
+// The globals above read Config.toml during static initialisation. The web build only mounts
+// browser storage, where the player's Config.toml lives, once main() runs, so read them again.
+int VolumePercent(float volume) { return static_cast<int>(std::lround(volume * 100.0f)); }
+
+void ReloadSettingsFromConfig() {
+    g_rumbleEnabled = RuntimeConfigFile::RumbleEnabled(true);
+    g_resolutionScale = RuntimeConfigFile::ResolutionMultiplier(1.0f);
+    g_audioVolumePercent = VolumePercent(RuntimeConfigFile::AudioVolume(1.0f));
+    g_musicVolumePercent = VolumePercent(RuntimeConfigFile::MusicVolume(1.0f));
+    g_soundEffectsVolumePercent = VolumePercent(RuntimeConfigFile::SoundEffectsVolume(1.0f));
+    g_uiVolumePercent = VolumePercent(RuntimeConfigFile::UiVolume(1.0f));
+    g_voicesVolumePercent = VolumePercent(RuntimeConfigFile::VoicesVolume(1.0f));
+    g_audioMuted = RuntimeConfigFile::AudioMuted(false);
+    g_muteHotkey = RuntimeConfigFile::MuteHotkey(SDL_SCANCODE_BACKSLASH);
+    g_audioMixWorker = RuntimeConfigFile::AudioMixWorkerEnabled(true);
+    g_attenuateMusicWhenMediaPlays = RuntimeConfigFile::AttenuateMusicWhenMediaPlays(false);
+    g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
+    g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
+    g_showFps = RuntimeConfigFile::ShowFps(true);
+    g_forceAspect169 = RuntimeConfigFile::ForceAspect169Enabled();
+    g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
+    g_wiiRemotesEnabled = RuntimeConfigFile::WiiRemotesEnabled(true);
+    g_wiiContinuousScan = RuntimeConfigFile::WiiContinuousScanEnabled(false);
+    const uint32_t interpolationFps = RuntimeConfigFile::FrameInterpolationFps(0);
+    g_frameInterpolationMode = interpolationFps == 120 ? 1 : interpolationFps == 180 ? 2 : 0;
+}
+} // namespace
+
 void InitializeRuntimeSettings() noexcept {
+    ReloadSettingsFromConfig();
     PAD_HLE_SetRumbleEnabled(g_rumbleEnabled);
     InputBindings::Reload();
     controller_mapping_wizard::LoadPersistedMappings();
