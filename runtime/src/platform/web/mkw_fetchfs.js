@@ -4,8 +4,9 @@
 //    chunks by the backend chunk size instead of the whole-file size, splicing wrong bytes in.
 //  - Learning a file's size costs a HEAD plus a data fetch, so scanning the 2000-file disc at
 //    start-up downloads a large part of it.
-// Here sizes come from game/manifest.txt ("f <size> <path>"), reads fetch exactly the
-// chunk-aligned ranges they need, and fetched chunks are kept in a bounded LRU cache.
+// Sizes and immutable asset mappings come from game/manifest-v2.txt. Small files share a
+// verified pack; bounded archives load at once; video reads keep a short buffer ahead.
+// Other reads fetch chunk-aligned ranges, kept in a bounded LRU cache.
 //
 // This runs on the WASMFS proxy worker, not on the thread that created the backend, so the
 // manifest is fetched again here rather than handed over from C++.
@@ -21,6 +22,8 @@ addToLibrary({
     // straight away), so lookups wait on the manifest instead.
     let manifestBytes;
     const aliases = new Map();
+    const packedFiles = new Map();
+    const packDownloads = new Map();
     const sizesReady = (async () => {
       const sizes = new Map();
       const response = await fetch('game/manifest-v2.txt', {cache: 'no-store'});
@@ -36,6 +39,20 @@ addToLibrary({
             throw new Error('Invalid browser video alias');
           }
           aliases.set('/game/' + alias[0], new URL('game/' + alias[1], self.location.href).href);
+        }
+        if (line.startsWith('p ')) {
+          const packed = JSON.parse(line.slice(2));
+          if (!Array.isArray(packed) || packed.length !== 4 || typeof packed[0] !== 'string' ||
+              typeof packed[1] !== 'string' ||
+              !/^file-packs\/[a-f0-9]{64}\.bin$/.test(packed[1]) ||
+              !Number.isSafeInteger(packed[2]) || packed[2] < 0 ||
+              !Number.isSafeInteger(packed[3]) || packed[3] <= 0 || packed[3] > 65536) {
+            throw new Error('Invalid small-file pack entry');
+          }
+          packedFiles.set('/game/' + packed[0], {
+            url: new URL('game/' + packed[1], self.location.href).href,
+            offset: packed[2], size: packed[3],
+          });
         }
       }
       if (!(sizes.get('/game/DATA/sys/fst.bin') > 0)) throw new Error('missing disc file entries');
@@ -86,7 +103,13 @@ addToLibrary({
         size = length === null ? NaN : Number(length);
         if (!Number.isSafeInteger(size) || size < 0) throw new Error('Missing file length: ' + key);
       }
-      info = {url, size, chunkSize: __wasmfs_fetch_get_chunk_size(file), chunks: new Map()};
+      // Another asynchronous lookup can have completed while this one awaited metadata.
+      info = files.get(file);
+      if (info) return info;
+      const packed = packedFiles.get(key);
+      if (packed && packed.size !== size) throw new Error('Small-file pack size mismatch');
+      info = {url, size, packed, chunkSize: __wasmfs_fetch_get_chunk_size(file), chunks: new Map(),
+              inflight: new Map(), prefetch: null};
       files.set(file, info);
       if (key === '/game/manifest.txt') {
         for (let offset = 0, index = 0; offset < size; offset += info.chunkSize, index++) {
@@ -98,7 +121,37 @@ addToLibrary({
       return info;
     }
 
+    async function getPack(entry) {
+      let download = packDownloads.get(entry.url);
+      if (!download) {
+        download = (async () => {
+          const response = await fetch(entry.url, {cache: 'force-cache'});
+          if (!response.ok) throw response;
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          if (bytes.byteLength > 16 * 1024 * 1024) throw new Error('Small-file pack too large');
+          const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+          const hash = Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('');
+          if (!entry.url.endsWith('/' + hash + '.bin')) throw new Error('Small-file pack checksum mismatch');
+          return bytes;
+        })();
+        packDownloads.set(entry.url, download);
+        download.catch(() => { if (packDownloads.get(entry.url) === download) packDownloads.delete(entry.url); });
+      }
+      return download;
+    }
+
     async function ensure(file, info, first, last) {
+      // Join an earlier prefetch/read for these chunks instead of downloading them twice.
+      // Recheck after waiting: another caller may already be retrying a failed prefetch.
+      for (;;) {
+        const waiting = new Set();
+        for (let i = first; i <= last; i++) {
+          if (!info.chunks.has(i) && info.inflight.has(i)) waiting.add(info.inflight.get(i));
+        }
+        if (!waiting.size) break;
+        await Promise.allSettled([...waiting]);
+      }
+      if (files.get(file) !== info) return;
       let missingFirst = -1, missingLast = -1;
       for (let i = first; i <= last; i++) {
         if (info.chunks.has(i)) {
@@ -109,28 +162,65 @@ addToLibrary({
         }
       }
       if (missingFirst < 0) return;
-      const start = missingFirst * info.chunkSize;
-      const end = Math.min((missingLast + 1) * info.chunkSize, info.size) - 1;
-      const response = await fetch(info.url, {headers: {'Range': `bytes=${start}-${end}`}});
-      if (!response.ok) throw response;
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (response.status === 200 && bytes.byteLength === info.size) {
-        // The server ignored the range and sent the whole file.
+      if (info.packed) {
+        const pack = await getPack(info.packed);
+        if (files.get(file) !== info) return;
+        if (info.packed.offset + info.size > pack.byteLength) throw new Error('Truncated small-file pack');
         for (let i = missingFirst; i <= missingLast; i++) {
-          const chunk = bytes.slice(i * info.chunkSize, (i + 1) * info.chunkSize);
+          const start = info.packed.offset + i * info.chunkSize;
+          const end = info.packed.offset + Math.min(info.size, (i + 1) * info.chunkSize);
+          const chunk = pack.slice(start, end);
           info.chunks.set(i, chunk);
           touch(file, i, chunk.byteLength);
         }
         return;
       }
-      if (response.status !== 206 || bytes.byteLength !== end - start + 1) throw {status: 0};
-      for (let i = missingFirst; i <= missingLast; i++) {
-        const chunk = bytes.slice(i * info.chunkSize - start, (i + 1) * info.chunkSize - start);
-        info.chunks.set(i, chunk);
-        touch(file, i, chunk.byteLength);
+      // Yaz0 archives are consumed whole immediately after their header is read. One bounded
+      // fetch avoids serial round trips for the header and subsequent compressed data.
+      if (/\.szs$/i.test(info.url.pathname) && info.size <= 16 * 1024 * 1024) {
+        missingFirst = 0;
+        missingLast = Math.ceil(info.size / info.chunkSize) - 1;
+      }
+      const download = (async () => {
+        const start = missingFirst * info.chunkSize;
+        const end = Math.min((missingLast + 1) * info.chunkSize, info.size) - 1;
+        const response = await fetch(info.url, {headers: {'Range': `bytes=${start}-${end}`}});
+        if (!response.ok) throw response;
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (files.get(file) !== info) return; // a closed file must not repopulate the cache
+        const wholeFile = response.status === 200 && bytes.byteLength === info.size;
+        if (!wholeFile && (response.status !== 206 || bytes.byteLength !== end - start + 1)) throw {status: 0};
+        for (let i = missingFirst; i <= missingLast; i++) {
+          const base = wholeFile ? 0 : start;
+          const chunk = bytes.slice(i * info.chunkSize - base, (i + 1) * info.chunkSize - base);
+          info.chunks.set(i, chunk);
+          touch(file, i, chunk.byteLength);
+        }
+      })();
+      for (let i = missingFirst; i <= missingLast; i++) info.inflight.set(i, download);
+      try {
+        await download;
+      } finally {
+        for (let i = missingFirst; i <= missingLast; i++) {
+          if (info.inflight.get(i) === download) info.inflight.delete(i);
+        }
       }
     }
 
+    function prefetchVideo(file, info, lastRead) {
+      if (info.prefetch || !/\.thp$/i.test(info.url.pathname) || files.get(file) !== info) return;
+      let first = lastRead + 1;
+      const end = Math.ceil(info.size / info.chunkSize) - 1;
+      while (first <= end && info.chunks.has(first)) first++;
+      // Keep a few chunks ahead, issuing four-chunk batches while two remain buffered.
+      // This is bounded to the current video, not a preload of the whole disc or all movies.
+      if (first > end || first - lastRead - 1 > 2 || info.inflight.has(first)) return;
+      const pending = ensure(file, info, first, Math.min(first + 3, end));
+      info.prefetch = pending;
+      pending.catch(() => {}).finally(() => {
+        if (info.prefetch === pending) info.prefetch = null;
+      });
+    }
     wasmFS$backends[backend] = {
       allocFile: async (file) => {},
       freeFile: async (file) => {
@@ -160,6 +250,7 @@ addToLibrary({
             HEAPU8.set(info.chunks.get(i).subarray(from - chunkStart, to - chunkStart),
                        buffer + (from - offset));
           }
+          prefetchVideo(file, info, last);
           return length;
         } catch (failed) {
           return failed && failed.status === 404 ? -{{{ cDefs.ENOENT }}} : -{{{ cDefs.EIO }}};

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { createHash, webcrypto } from 'node:crypto';
 import vm from 'node:vm';
 
 const manifest = '# café\nd DATA\nd DATA/sys\nf 10 DATA/sys/fst.bin\nf 12 DATA/files/test.bin\n';
@@ -8,28 +9,39 @@ const manifestBytes = new TextEncoder().encode(manifest);
 const source = (await readFile(new URL('../mkw_fetchfs.js', import.meta.url), 'utf8'))
   .replace(/\{\{\{\s*cDefs\.(\w+)\s*\}\}\}/g, (_, name) => ({ EROFS: 30, ENOENT: 2, EIO: 5 })[name]);
 
-function setup({ invalidManifest = false, ignoreRange = false, aliases = '' } = {}) {
+const encode = (text) => new TextEncoder().encode(text);
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function setup({ invalidManifest = false, ignoreRange = false, aliases = '', manifestText = manifest,
+                 fileUrls = { 2: 'DATA/files/test.bin' }, contents = {}, beforeFetch = async () => {} } = {}) {
   const requests = [], errors = [], backends = {}, heap = new Uint8Array(4096);
   let library;
   vm.runInNewContext(source, {
     addToLibrary(value) { library = value; },
     wasmFS$backends: backends, HEAPU8: heap,
     UTF8ToString: (s) => s,
-    __wasmfs_fetch_get_file_url: (file) => file === 1 ? 'game//manifest.txt' : 'game//DATA/files/test.bin',
+    __wasmfs_fetch_get_file_url: (file) => file === 1 ? 'game//manifest.txt' : 'game//' + fileUrls[file],
     __wasmfs_fetch_get_chunk_size: () => 4,
     self: { location: { href: 'https://game.test/WiiCompiled.js' } },
-    URL, TextDecoder,
+    URL, TextDecoder, crypto: webcrypto,
     console: { error: (...args) => errors.push(args.join(' ')) },
     fetch: async (url, options = {}) => {
       requests.push({ url: String(url), options });
+      const override = await beforeFetch(String(url), options);
+      if (override) return override;
       // Reproduce a hosted/cached HEAD with an unusable length. The manifest's own GET
       // contains the correct bytes, so boot must not depend on this second request.
       if (options.method === 'HEAD') return new Response(null, { headers: { 'Content-Length': '0' } });
       if (/manifest(?:-v2)?\.txt$/.test(String(url))) {
-        return new Response(invalidManifest ? '<html>Sign in</html>' : new TextEncoder().encode(manifest + aliases));
+        return new Response(invalidManifest ? '<html>Sign in</html>' : encode(manifestText + aliases));
       }
-      const data = new TextEncoder().encode('abcdefghijkl');
-      if (ignoreRange) return new Response(data);
+      const data = contents[new URL(url).pathname.replace(/^\/game\//, '')] ?? encode('abcdefghijkl');
+      if (ignoreRange || !options.headers?.Range) return new Response(data);
       const [, first, last] = /^bytes=(\d+)-(\d+)$/.exec(options.headers.Range);
       return new Response(data.slice(Number(first), Number(last) + 1), { status: 206 });
     },
@@ -77,4 +89,147 @@ test('browser video aliases keep logical file sizes and use immutable download U
   assert.equal(new TextDecoder().decode(heap.slice(0, 4)), 'abcd');
   assert.equal(requests[0].url, 'game/manifest-v2.txt');
   assert.equal(requests[1].url, 'https://game.test/game/' + target);
+});
+
+test('concurrent cold reads share a single file description and download', async () => {
+  const gate = deferred();
+  const { backend, requests, heap } = setup({
+    beforeFetch: async (url) => { if (url.endsWith('test.bin')) await gate.promise; },
+  });
+  const first = backend.read(2, 0, 8, 0);
+  const second = backend.read(2, 20, 4, 4);
+  await tick();
+  assert.equal(requests.length, 2); // manifest plus one range
+  gate.resolve();
+  assert.deepEqual(await Promise.all([first, second]), [8, 4]);
+  assert.equal(new TextDecoder().decode(heap.slice(20, 24)), 'efgh');
+});
+
+test('packed files share one verified download and preserve file-relative offsets', async () => {
+  const payload = encode('abcdefghijkl0123456789');
+  const target = 'file-packs/' + createHash('sha256').update(payload).digest('hex') + '.bin';
+  const packed = [['DATA/files/test.bin', target, 0, 12], ['DATA/files/other.bin', target, 12, 10]];
+  const { backend, requests, heap } = setup({
+    manifestText: manifest + 'f 10 DATA/files/other.bin\n',
+    aliases: packed.map((row) => 'p ' + JSON.stringify(row) + '\n').join(''),
+    fileUrls: { 2: 'DATA/files/test.bin', 3: 'DATA/files/other.bin' },
+    contents: { [target]: payload },
+  });
+  assert.deepEqual(await Promise.all([backend.read(2, 0, 6, 3), backend.read(3, 20, 7, 3)]), [6, 7]);
+  assert.equal(new TextDecoder().decode(heap.slice(0, 6)), 'defghi');
+  assert.equal(new TextDecoder().decode(heap.slice(20, 27)), '3456789');
+  await backend.freeFile(2);
+  assert.equal(await backend.read(2, 40, 4, 8), 4);
+  assert.equal(new TextDecoder().decode(heap.slice(40, 44)), 'ijkl');
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].options.cache, 'force-cache');
+});
+
+test('corrupt or truncated packs never copy invalid bytes into game memory', async () => {
+  for (const corruption of ['checksum', 'bounds', 'size']) {
+    const payload = encode('abcdefghijkl');
+    const hash = corruption === 'checksum' ? '0'.repeat(64) : createHash('sha256').update(payload).digest('hex');
+    const target = 'file-packs/' + hash + '.bin';
+    const row = ['DATA/files/test.bin', target, corruption === 'bounds' ? 1 : 0, corruption === 'size' ? 11 : 12];
+    const { backend, heap } = setup({ aliases: 'p ' + JSON.stringify(row) + '\n', contents: { [target]: payload } });
+    heap.fill(123);
+    assert.equal(await backend.read(2, 0, 4, 0), -5, corruption);
+    assert.ok(heap.every((byte) => byte === 123), corruption);
+  }
+});
+
+test('a failed pack download is retried by the next read', async () => {
+  const payload = encode('abcdefghijkl');
+  const target = 'file-packs/' + createHash('sha256').update(payload).digest('hex') + '.bin';
+  let attempts = 0;
+  const { backend, heap } = setup({
+    aliases: 'p ' + JSON.stringify(['DATA/files/test.bin', target, 0, 12]) + '\n',
+    contents: { [target]: payload },
+    beforeFetch: async (url) => { if (url.includes('/file-packs/') && ++attempts === 1) return new Response(null, { status: 503 }); },
+  });
+  assert.equal(await backend.read(2, 0, 4, 0), -5);
+  assert.equal(await backend.read(2, 0, 4, 0), 4);
+  assert.equal(new TextDecoder().decode(heap.slice(0, 4)), 'abcd');
+  assert.equal(attempts, 2);
+});
+
+test('an archive header read fetches the bounded archive once for subsequent reads', async () => {
+  const { backend, requests, heap } = setup({
+    manifestText: manifest.replace('test.bin', 'test.szs'), fileUrls: { 2: 'DATA/files/test.szs' },
+  });
+  assert.equal(await backend.read(2, 0, 2, 0), 2);
+  assert.equal(requests[1].options.headers.Range, 'bytes=0-11');
+  assert.equal(await backend.read(2, 20, 6, 6), 6);
+  assert.equal(new TextDecoder().decode(heap.slice(20, 26)), 'ghijkl');
+  assert.equal(requests.length, 2);
+});
+
+test('large archives keep bounded range reads instead of downloading the whole file', async () => {
+  const { backend, requests } = setup({
+    manifestText: manifest.replace('f 12 DATA/files/test.bin', 'f 16777217 DATA/files/test.szs'),
+    fileUrls: { 2: 'DATA/files/test.szs' },
+  });
+  assert.equal(await backend.read(2, 0, 2, 0), 2);
+  assert.equal(requests[1].options.headers.Range, 'bytes=0-3');
+});
+
+function videoSetup(options = {}) {
+  return setup({
+    manifestText: manifest.replace('f 12 DATA/files/test.bin', 'f 40 DATA/files/test.thp'),
+    fileUrls: { 2: 'DATA/files/test.thp' },
+    contents: { 'DATA/files/test.thp': encode('0123456789'.repeat(4)) },
+    ...options,
+  });
+}
+
+test('video reads return before read-ahead completes and demand joins that download', async () => {
+  const gate = deferred();
+  const { backend, requests, heap } = videoSetup({
+    beforeFetch: async (_url, options) => { if (options.headers?.Range === 'bytes=4-19') await gate.promise; },
+  });
+  assert.equal(await backend.read(2, 0, 4, 0), 4);
+  assert.equal(requests[2].options.headers.Range, 'bytes=4-19');
+  const demand = backend.read(2, 20, 4, 4);
+  await tick();
+  assert.equal(requests.length, 3);
+  gate.resolve();
+  assert.equal(await demand, 4);
+  assert.equal(new TextDecoder().decode(heap.slice(20, 24)), '4567');
+  assert.equal(requests.length, 3);
+  // With two chunks still buffered, start another four-chunk batch.
+  assert.equal(await backend.read(2, 30, 4, 8), 4);
+  assert.equal(requests[3].options.headers.Range, 'bytes=20-35');
+});
+
+test('a failed background video read can be retried on demand', async () => {
+  let failed = false;
+  const { backend, requests, heap } = videoSetup({
+    beforeFetch: async (_url, options) => {
+      if (!failed && options.headers?.Range === 'bytes=4-19') {
+        failed = true;
+        return new Response(null, { status: 503 });
+      }
+    },
+  });
+  assert.equal(await backend.read(2, 0, 4, 0), 4);
+  await tick();
+  assert.equal(await backend.read(2, 20, 4, 4), 4);
+  assert.equal(requests[3].options.headers.Range, 'bytes=4-7');
+  assert.equal(new TextDecoder().decode(heap.slice(20, 24)), '4567');
+});
+
+test('an in-flight read cannot restore data after its file is freed', async () => {
+  const gate = deferred();
+  let attempts = 0;
+  const { backend, requests, heap } = setup({
+    beforeFetch: async (url) => { if (url.endsWith('test.bin') && ++attempts === 1) await gate.promise; },
+  });
+  const read = backend.read(2, 0, 4, 0);
+  await tick();
+  await backend.freeFile(2);
+  gate.resolve();
+  assert.equal(await read, -5);
+  assert.ok(heap.every((byte) => byte === 0));
+  assert.equal(await backend.read(2, 0, 4, 0), 4);
+  assert.equal(requests.length, 3);
 });
