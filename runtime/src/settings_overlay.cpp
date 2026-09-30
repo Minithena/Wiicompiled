@@ -590,6 +590,26 @@ void DrawKeyBinding(const char* label, int scancode, RebindKind kind, uint16_t t
 
 }
 
+void ApplyWasdPreset(uint32_t port) {
+    const std::array<int, PAD_BUTTON_COUNT> keys = {
+        PAD_KEY_MOUSE_LEFT, SDL_SCANCODE_SPACE, SDL_SCANCODE_E, SDL_SCANCODE_Q,
+        SDL_SCANCODE_RETURN, PAD_KEY_MOUSE_MIDDLE, SDL_SCANCODE_LSHIFT, PAD_KEY_MOUSE_RIGHT,
+        SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT,
+    };
+    for (size_t i = 0; i < keys.size(); ++i)
+        PADSetKeyButtonBinding(port, {keys[i], kControllerButtons[i].padButton});
+    const std::array<int, PAD_AXIS_COUNT> axes = {
+        SDL_SCANCODE_D, SDL_SCANCODE_A, SDL_SCANCODE_W, SDL_SCANCODE_S,
+        SDL_SCANCODE_L, SDL_SCANCODE_J, SDL_SCANCODE_I, SDL_SCANCODE_K,
+        SDL_SCANCODE_LSHIFT, PAD_KEY_MOUSE_RIGHT,
+    };
+    uint32_t axisCount = 0;
+    auto* mappings = PADGetKeyAxisBindings(port, &axisCount);
+    for (uint32_t i = 0; i < axisCount; ++i)
+        PADSetKeyAxisBinding(port, {axes[i], mappings[i].padAxis, 1});
+    PADSerializeMappings();
+}
+
 bool DrawKeyboardSettings(uint32_t port) {
     uint32_t count = 0;
     auto* buttons = PADGetKeyButtonBindings(port, &count);
@@ -606,23 +626,7 @@ bool DrawKeyboardSettings(uint32_t port) {
     if (!enabled) return false;
     ImGui::TextDisabled("Replaces the gamepad on this port. F10 opens settings.");
     if (ImGui::Button("Use WASD + mouse preset") || usePreset) {
-        const std::array<int, PAD_BUTTON_COUNT> keys = {
-            PAD_KEY_MOUSE_LEFT, SDL_SCANCODE_SPACE, SDL_SCANCODE_E, SDL_SCANCODE_Q,
-            SDL_SCANCODE_RETURN, PAD_KEY_MOUSE_MIDDLE, SDL_SCANCODE_LSHIFT, PAD_KEY_MOUSE_RIGHT,
-            SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT,
-        };
-        for (size_t i = 0; i < keys.size(); ++i)
-            PADSetKeyButtonBinding(port, {keys[i], kControllerButtons[i].padButton});
-        const std::array<int, PAD_AXIS_COUNT> axes = {
-            SDL_SCANCODE_D, SDL_SCANCODE_A, SDL_SCANCODE_W, SDL_SCANCODE_S,
-            SDL_SCANCODE_L, SDL_SCANCODE_J, SDL_SCANCODE_I, SDL_SCANCODE_K,
-            SDL_SCANCODE_LSHIFT, PAD_KEY_MOUSE_RIGHT,
-        };
-        uint32_t axisCount = 0;
-        auto* mappings = PADGetKeyAxisBindings(port, &axisCount);
-        for (uint32_t i = 0; i < axisCount; ++i)
-            PADSetKeyAxisBinding(port, {axes[i], mappings[i].padAxis, 1});
-        PADSerializeMappings();
+        ApplyWasdPreset(port);
     }
     ImGui::SeparatorText("Button mapping");
     for (uint32_t i = 0; i < count; ++i) {
@@ -1383,6 +1387,15 @@ void ApplyInputBlockState() {
     InputBindings::SetInputBlocked(blocked);
 }
 } // namespace
+
+void EnableKeyboardByDefault() noexcept {
+    uint32_t count = 0;
+    if (PADGetKeyButtonBindings(0, &count) != nullptr) {
+        return;
+    }
+    PADSetKeyboardActive(0, TRUE);
+    ApplyWasdPreset(0);
+}
 
 void InitializeRuntimeSettings() noexcept {
     PAD_HLE_SetRumbleEnabled(g_rumbleEnabled);

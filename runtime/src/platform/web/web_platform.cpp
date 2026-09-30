@@ -6,17 +6,25 @@
 // /game with the WASMFS fetch backend: each listed file becomes a lazily fetched file, read in
 // chunks with HTTP range requests the first time the game touches it (mkw_fetchfs.js, which also
 // takes the sizes from the manifest). User state (Config.toml, NAND, logs) lives in memory under
-// /data for now.
+// /data for now; an optional `game/save/rksys.dat` seeds the NAND save.
 #if defined(__EMSCRIPTEN__)
 
 #include "web_platform.h"
 
+#include "fiber_manager.h"
+#include "guest_flat_memory.h"
+#include "recomp_mod_loader.h"
 #include "runtime_config.h"
+
+#include <atomic>
+#include <chrono>
+#include <thread>
 
 #include <emscripten/wasmfs.h>
 
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -25,6 +33,10 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+namespace HostContext {
+extern std::atomic<uint32_t> g_webContextSwitches;
+}
 
 namespace WebPlatform {
 namespace {
@@ -79,6 +91,41 @@ void MountGame() {
         files += line[0] == 'f';
     }
     std::printf("[web] mounted %zu game files at %s\n", files, kGameMount);
+
+    // Seed the (in-memory) NAND with the save staged next to the disc, if any.
+    const std::filesystem::path stagedSave = std::string(kGameMount) + "/save/rksys.dat";
+    const std::filesystem::path nandSave = RuntimeConfigFile::ApplicationDataDirectory() /
+        "NAND/title/00010004/524d4350/data/rksys.dat";
+    std::error_code ec;
+    if (std::filesystem::exists(stagedSave, ec) && !std::filesystem::exists(nandSave, ec)) {
+        std::filesystem::create_directories(nandSave.parent_path(), ec);
+        std::filesystem::copy_file(stagedSave, nandSave, ec);
+        std::printf("[web] %s the staged save into the NAND\n", ec ? "could not copy" : "copied");
+    }
+}
+
+void StartWatchdog() {
+    // Other threads can read the game thread's state: it all lives in shared linear memory.
+    const uint32_t* translatedAddress = &RecompMod::g_currentTranslatedExecutionAddress;
+    std::thread([translatedAddress] {
+        uint32_t lastSwitches = 0;
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            const uint32_t switches = HostContext::g_webContextSwitches.load(std::memory_order_relaxed);
+            uint32_t runningThread = 0;
+            if (const uint8_t* p = GuestFlat::HostPointer(0x800000e4u)) {
+                runningThread = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
+                                (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+            }
+            std::printf("[web] watchdog: switches=%u (+%u) retracePending=%u guestThread=%08x "
+                        "osThread=%08x translated=%08x\n",
+                        switches, switches - lastSwitches,
+                        Fiber::g_viRetracePendingCount.load(std::memory_order_relaxed),
+                        Fiber::GuestFiberManager::GetCurrentGuestThreadForWatchdog(), runningThread,
+                        *reinterpret_cast<const volatile uint32_t*>(translatedAddress));
+            lastSwitches = switches;
+        }
+    }).detach();
 }
 
 } // namespace WebPlatform
@@ -101,6 +148,10 @@ __attribute__((constructor(101))) static void WriteDefaultConfig() {
               "\n"
               "[paths]\n"
               "dvd_root = \"/game/DATA\"\n";
+    // The page sets this for a "?muted" URL (shell.html).
+    if (const char* muted = std::getenv("MKW_WEB_MUTED"); muted && *muted == '1') {
+        config << "\n[audio]\nmuted = true\n";
+    }
 }
 
 #endif

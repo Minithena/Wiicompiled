@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WiiCompiled</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #000; color: #ddd;
+               font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  /* The game renders at its own size; the element scales to fit the window, letterboxed. */
+  #canvas { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain;
+            display: block; outline: none; }
+  #overlay { position: fixed; inset: 0; display: flex; flex-direction: column; gap: 14px;
+             align-items: center; justify-content: center; background: #000c; }
+  #overlay[hidden] { display: none; }
+  #start { font: inherit; font-size: 18px; padding: 12px 28px; border-radius: 999px; border: 0;
+           background: #e60012; color: #fff; cursor: pointer; }
+  #start:disabled { background: #555; cursor: default; }
+  #status { min-height: 1.4em; color: #aaa; text-align: center; padding: 0 16px; }
+  #help { color: #888; font-size: 13px; text-align: center; padding: 0 16px; }
+</style>
+</head>
+<body>
+<canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+<div id="overlay">
+  <button id="start" disabled>Loading…</button>
+  <div id="status"></div>
+  <div id="help">Keyboard: WASD steer · left click accelerate/confirm · right click drift ·
+    Shift item · Space back · Enter pause · F10 settings</div>
+</div>
+<script>
+  const params = new URLSearchParams(location.search);
+  const statusEl = document.getElementById('status');
+  const startButton = document.getElementById('start');
+  const missing = [];
+  if (!self.crossOriginIsolated) missing.push('cross-origin isolation (serve with tools/serve.py)');
+  if (!('gpu' in navigator)) missing.push('WebGPU');
+  if (!('Suspending' in WebAssembly)) missing.push('WebAssembly JSPI (use a current Chrome)');
+
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    preRun: [() => { if (params.has('muted')) ENV.MKW_WEB_MUTED = '1'; }],
+    print: (text) => console.log(text),
+    printErr: (text) => console.error(text),
+    setStatus: (text) => { statusEl.textContent = text; },
+    onRuntimeInitialized: () => {
+      statusEl.textContent = '';
+      startButton.disabled = false;
+      startButton.textContent = 'Start';
+    },
+    onAbort: (what) => {
+      document.getElementById('overlay').hidden = false;
+      startButton.hidden = true;
+      statusEl.textContent = 'The game stopped: ' + what + ' (details in the browser console).';
+    },
+  };
+
+  if (missing.length) {
+    startButton.hidden = true;
+    statusEl.textContent = 'This browser is missing: ' + missing.join(', ') + '.';
+  }
+
+  // Browsers only start audio after a user gesture, so the game waits for this click.
+  startButton.addEventListener('click', () => {
+    document.getElementById('overlay').hidden = true;
+    Module.canvas.focus();
+    Module.callMain([]);
+  });
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

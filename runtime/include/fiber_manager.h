@@ -97,6 +97,9 @@ public:
     static bool HasFiber(uint32_t guestThreadAddr);
     static bool IsTerminated(uint32_t guestThreadAddr);
 
+    // Racy read for the web watchdog (web_platform.cpp); diagnostics only.
+    static uint32_t GetCurrentGuestThreadForWatchdog() { return s_currentGuestThread; }
+
 private:
     // The fiber entry point wrapper
 #if defined(_WIN32)

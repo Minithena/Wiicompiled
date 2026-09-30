@@ -283,7 +283,8 @@ function(mkw_configure_product target)
         # adapter/device requests be awaited synchronously and carries the guest contexts
         # (HostContext, mkw_fibers.js), which all run on that one thread. WASMFS provides the lazy
         # fetch-backed disc mount (web_platform.cpp).
-        set_target_properties(${target} PROPERTIES SUFFIX ".html")
+        set_target_properties(${target} PROPERTIES SUFFIX ".html"
+            LINK_DEPENDS "${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/shell.html")
         target_link_options(${target} PRIVATE
             --use-port=emdawnwebgpu -sJSPI -sJSPI_EXPORTS=mkw_fiber_entry -sPROXY_TO_PTHREAD
             "--js-library=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/mkw_fibers.js"
@@ -292,6 +293,8 @@ function(mkw_configure_product target)
             -sALLOW_MEMORY_GROWTH -sINITIAL_MEMORY=536870912 -sMAXIMUM_MEMORY=4294967296
             -sSTACK_SIZE=8388608 -sDEFAULT_PTHREAD_STACK_SIZE=2097152 -sPTHREAD_POOL_SIZE=24
             -sWASMFS -sFORCE_FILESYSTEM -sEXIT_RUNTIME=0 -sASSERTIONS=1 --profiling-funcs
+            -sINVOKE_RUN=0 -sEXPORTED_RUNTIME_METHODS=callMain,ENV
+            "--shell-file=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/shell.html"
             "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/wii@/app/wii_bootstrap"
             "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/dsp/dsp_coef.bin@/app/dsp_coef.bin")
         return()

@@ -1441,6 +1441,9 @@ int RuntimeMain(int argc, char** argv) {
             throw std::runtime_error(auroraInfo.initializationError != nullptr
                 ? auroraInfo.initializationError : "No supported graphics backend is available");
         }
+#if defined(__EMSCRIPTEN__)
+        settings_overlay::EnableKeyboardByDefault();
+#endif
         if (requestedBackend != BACKEND_AUTO && auroraInfo.backend != requestedBackend) {
             RT_LOG(RT_TAG_RUNTIME) << "graphics_api=\"" << backend
                       << "\" is not available on this system; aurora fell back to \""
@@ -1538,6 +1541,7 @@ int main(int argc, char** argv) {
     std::setvbuf(stderr, nullptr, _IONBF, 0);
     try {
         WebPlatform::MountGame();
+        WebPlatform::StartWatchdog();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "[web] start-up failed: %s\n", e.what());
         return 1;

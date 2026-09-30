@@ -17,6 +17,7 @@ extern "C" void* mkw_co_init(void* stackTop, void (*entry)(void*), void* argumen
 #elif defined(__EMSCRIPTEN__)
 #include <emscripten/emscripten.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #elif defined(__linux__)
@@ -185,6 +186,9 @@ struct Context {
 Context* g_current = nullptr;
 } // namespace
 
+// Read by the web watchdog (web_platform.cpp) from another thread.
+std::atomic<uint32_t> g_webContextSwitches{0};
+
 extern "C" {
 // Suspends the calling context until something switches back to it, after starting or resuming
 // `to`. Implemented in mkw_fibers.js.
@@ -261,6 +265,7 @@ void Switch(Handle target)
     }
 
     g_current = destination;
+    g_webContextSwitches.fetch_add(1, std::memory_order_relaxed);
     mkw_fiber_switch(source, destination);
     g_current = source;
 }
