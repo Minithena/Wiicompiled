@@ -8,7 +8,7 @@ const manifestBytes = new TextEncoder().encode(manifest);
 const source = (await readFile(new URL('../mkw_fetchfs.js', import.meta.url), 'utf8'))
   .replace(/\{\{\{\s*cDefs\.(\w+)\s*\}\}\}/g, (_, name) => ({ EROFS: 30, ENOENT: 2, EIO: 5 })[name]);
 
-function setup({ invalidManifest = false, ignoreRange = false } = {}) {
+function setup({ invalidManifest = false, ignoreRange = false, aliases = '' } = {}) {
   const requests = [], errors = [], backends = {}, heap = new Uint8Array(4096);
   let library;
   vm.runInNewContext(source, {
@@ -25,8 +25,8 @@ function setup({ invalidManifest = false, ignoreRange = false } = {}) {
       // Reproduce a hosted/cached HEAD with an unusable length. The manifest's own GET
       // contains the correct bytes, so boot must not depend on this second request.
       if (options.method === 'HEAD') return new Response(null, { headers: { 'Content-Length': '0' } });
-      if (String(url).endsWith('manifest.txt')) {
-        return new Response(invalidManifest ? '<html>Sign in</html>' : manifestBytes);
+      if (/manifest(?:-v2)?\.txt$/.test(String(url))) {
+        return new Response(invalidManifest ? '<html>Sign in</html>' : new TextEncoder().encode(manifest + aliases));
       }
       const data = new TextEncoder().encode('abcdefghijkl');
       if (ignoreRange) return new Response(data);
@@ -67,4 +67,14 @@ test('an HTML login response cannot become an empty successful manifest', async 
   assert.equal(await backend.getSize(1), 0);
   assert.equal(await backend.read(1, 0, 10, 0), -5);
   assert.ok(errors.some((message) => /manifest/i.test(message)));
+});
+
+test('browser video aliases keep logical file sizes and use immutable download URLs', async () => {
+  const target = 'web-videos/' + 'a'.repeat(64) + '.thp';
+  const { backend, requests, heap } = setup({ aliases: 'u ' + JSON.stringify(['DATA/files/test.bin', target]) + '\n' });
+  assert.equal(await backend.getSize(2), 12);
+  assert.equal(await backend.read(2, 0, 4, 0), 4);
+  assert.equal(new TextDecoder().decode(heap.slice(0, 4)), 'abcd');
+  assert.equal(requests[0].url, 'game/manifest-v2.txt');
+  assert.equal(requests[1].url, 'https://game.test/game/' + target);
 });

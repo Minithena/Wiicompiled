@@ -467,6 +467,8 @@ struct RebindState {
 
 #if defined(__EMSCRIPTEN__)
 std::atomic<uint32_t> g_webRebindRequest{0};
+std::atomic<int32_t> g_webVolumeRequest{-1};
+std::atomic<int32_t> g_webMuteRequest{-1};
 bool g_webRebindPrompt = false;
 #endif
 
@@ -1407,7 +1409,21 @@ void PersistDisplayModeIfChanged() {
 #if defined(__EMSCRIPTEN__)
 // The page queues a request with an atomic-only export. The game thread owns all SDL/ImGui
 // state and applies it at the next frame, reusing the existing binding persistence path.
-void ProcessWebRebindRequest() {
+void ProcessWebControls() {
+    const int32_t volumeRequest = g_webVolumeRequest.exchange(-1, std::memory_order_relaxed);
+    if (volumeRequest >= 0) {
+        g_audioVolumePercent = volumeRequest & 255;
+        const float volume = static_cast<float>(g_audioVolumePercent) / 100.0f;
+        AudioBackend::Instance().SetMasterVolume(volume);
+        // Pointer movement changes audio immediately; persist only on slider release/change.
+        if (volumeRequest & 256) RuntimeConfigFile::SetAudioVolume(volume);
+    }
+    const int32_t muteRequest = g_webMuteRequest.exchange(-1, std::memory_order_relaxed);
+    if (muteRequest >= 0) {
+        g_audioMuted = muteRequest != 0;
+        AudioBackend::Instance().SetMuted(g_audioMuted);
+        RuntimeConfigFile::SetAudioMuted(g_audioMuted);
+    }
     const uint32_t request = g_webRebindRequest.exchange(0, std::memory_order_relaxed);
     if (request == 0) return;
     if (request == 200) {
@@ -1472,6 +1488,8 @@ void PublishWebBindings() {
         }
         json += '}';
     }
+    json += ",\"volume\":" + std::to_string(g_audioVolumePercent) +
+            ",\"muted\":" + (g_audioMuted ? "true" : "false");
     json += ",\"requests\":" + requests + "},\"editing\":" +
             (g_webRebindPrompt && g_rebind.active ? "true" : "false") + '}';
     if (json == published) return;
@@ -1649,7 +1667,7 @@ void Draw() noexcept {
     UpdateCursorAutoHide();
     UpdateBootShaderState();
 #if defined(__EMSCRIPTEN__)
-    ProcessWebRebindRequest();
+    ProcessWebControls();
     PublishWebBindings();
     WebVnet::Pump();
 #endif
@@ -1695,6 +1713,14 @@ void AdvancePresentedFrame() noexcept { ++g_presentedFrame; }
 #if defined(__EMSCRIPTEN__)
 extern "C" EMSCRIPTEN_KEEPALIVE void mkw_web_rebind(uint32_t request) {
     g_webRebindRequest.store(request, std::memory_order_relaxed);
+}
+extern "C" EMSCRIPTEN_KEEPALIVE void mkw_web_volume(int32_t percent, int32_t commit) {
+    if (percent >= 0 && percent <= 100) {
+        g_webVolumeRequest.store(percent | (commit ? 256 : 0), std::memory_order_relaxed);
+    }
+}
+extern "C" EMSCRIPTEN_KEEPALIVE void mkw_web_mute(int32_t muted) {
+    if (muted == 0 || muted == 1) g_webMuteRequest.store(muted, std::memory_order_relaxed);
 }
 #endif
 } // namespace settings_overlay

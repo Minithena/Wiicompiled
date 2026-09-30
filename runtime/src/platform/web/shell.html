@@ -41,6 +41,11 @@
   .binding:disabled { cursor: default; opacity: .65; }
   .binding:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .binding.unbound { color: var(--muted); border-style: dashed; }
+  #volume-control { margin: 14px 0; }
+  .volume-row { display: flex; align-items: center; gap: 8px; }
+  .volume-row label { flex: 1; }
+  #volume { width: 100%; margin: 10px 0 0; accent-color: var(--accent); }
+  #volume-value { color: var(--muted); font-variant-numeric: tabular-nums; }
   .note { color: var(--muted); font-size: 12px; margin: 18px 0 0; }
   #room-panel { border-bottom: 1px solid var(--line); padding-bottom: 16px; margin-bottom: 16px; }
   #room-panel h2 { margin-bottom: 10px; }
@@ -104,6 +109,14 @@
     <div class="head">
       <h2>Controls</h2>
       <button id="hide-controls" class="link">Hide</button>
+    </div>
+    <div id="volume-control">
+      <div class="volume-row">
+        <label for="volume">Volume</label>
+        <output id="volume-value" for="volume">100%</output>
+        <button id="toggle-mute" class="link" disabled>Mute</button>
+      </div>
+      <input id="volume" type="range" min="0" max="100" step="1" value="100" aria-label="Master volume" disabled>
     </div>
     <p class="note" id="binding-help" role="status">Start the game, then click a key to change it.</p>
     <h3>Driving</h3>
@@ -283,8 +296,37 @@
     'Left Alt': 'Alt', 'Left GUI': 'Cmd', 'Up': '↑', 'Down': '↓', 'Left': '←', 'Right': '→',
   };
   let liveBindings = null;
+  const volumeSlider = document.getElementById('volume');
+  const volumeValue = document.getElementById('volume-value');
+  const muteButton = document.getElementById('toggle-mute');
+  const changeVolume = (commit) => {
+    const value = Number(volumeSlider.value);
+    volumeValue.textContent = value + '%';
+    if (typeof Module._mkw_web_volume === 'function') Module._mkw_web_volume(value, commit ? 1 : 0);
+  };
+  volumeSlider.addEventListener('input', () => changeVolume(false));
+  volumeSlider.addEventListener('change', () => changeVolume(true));
+  // Arrow keys on the slider adjust volume without also steering/navigating the game.
+  for (const type of ['keydown', 'keyup']) {
+    window.addEventListener(type, (event) => {
+      if (event.target === volumeSlider) event.stopImmediatePropagation();
+    }, true);
+  }
+  muteButton.addEventListener('click', () => {
+    if (liveBindings && typeof Module._mkw_web_mute === 'function') {
+      Module._mkw_web_mute(liveBindings.muted ? 0 : 1);
+    }
+  });
   window.mkwSetBindings = (json) => {
     const bindings = liveBindings = JSON.parse(json);
+    volumeSlider.disabled = typeof Module._mkw_web_volume !== 'function';
+    muteButton.disabled = typeof Module._mkw_web_mute !== 'function';
+    if (Number.isFinite(bindings.volume) && document.activeElement !== volumeSlider) {
+      volumeSlider.value = bindings.volume;
+      volumeValue.textContent = bindings.volume + '%';
+    }
+    muteButton.textContent = bindings.muted ? 'Unmute' : 'Mute';
+    muteButton.setAttribute('aria-pressed', String(!!bindings.muted));
     document.getElementById('keyboard-off').hidden = bindings.keyboard;
     for (const cell of document.querySelectorAll('[data-bind]')) {
       const id = cell.dataset.bind;

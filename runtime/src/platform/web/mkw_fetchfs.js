@@ -20,14 +20,23 @@ addToLibrary({
     // The backend must be registered before this function yields (the proxy starts calling it
     // straight away), so lookups wait on the manifest instead.
     let manifestBytes;
+    const aliases = new Map();
     const sizesReady = (async () => {
       const sizes = new Map();
-      const response = await fetch('game/manifest.txt', {cache: 'no-store'});
+      const response = await fetch('game/manifest-v2.txt', {cache: 'no-store'});
       if (!response.ok) throw new Error('HTTP ' + response.status);
       manifestBytes = new Uint8Array(await response.arrayBuffer());
       for (const line of new TextDecoder().decode(manifestBytes).split(/\r?\n/)) {
         const match = /^f (\d+) (.+)$/.exec(line);
         if (match) sizes.set('/game/' + match[2], Number(match[1]));
+        if (line.startsWith('u ')) {
+          const alias = JSON.parse(line.slice(2));
+          if (!Array.isArray(alias) || alias.length !== 2 || typeof alias[0] !== 'string' ||
+              typeof alias[1] !== 'string' || !/^web-videos\/[a-f0-9]{64}\.thp$/.test(alias[1])) {
+            throw new Error('Invalid browser video alias');
+          }
+          aliases.set('/game/' + alias[0], new URL('game/' + alias[1], self.location.href).href);
+        }
       }
       if (!(sizes.get('/game/DATA/sys/fst.bin') > 0)) throw new Error('missing disc file entries');
       // The manifest has already arrived. Reuse its bytes instead of a second HEAD/range
@@ -68,6 +77,7 @@ addToLibrary({
       const sizes = await sizesReady;
       if (!sizes) throw new Error('Game manifest could not be loaded');
       let size = sizes.get(key);
+      if (aliases.has(key)) url.href = aliases.get(key);
       if (size === undefined) {
         // Optional files absent from the manifest still need a metadata lookup.
         const head = await fetch(url, {method: 'HEAD'});
