@@ -11,6 +11,7 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <string>
 #include <utility>
@@ -562,6 +563,30 @@ void set_mouse_scroll(const float scrollX, const float scrollY) noexcept {
 void get_mouse_scroll(float* scrollX, float* scrollY) noexcept {
   *scrollX = g_MouseStatus.scrollX;
   *scrollY = g_MouseStatus.scrollY;
+}
+
+static std::array<std::atomic<uint64_t>, std::tuple_size_v<decltype(InputTaps::keys)>> g_tappedKeys{};
+static std::atomic<uint32_t> g_tappedMouse{0};
+
+void note_key_down(const SDL_Scancode scancode) noexcept {
+  if (scancode > SDL_SCANCODE_UNKNOWN && scancode < SDL_SCANCODE_COUNT) {
+    g_tappedKeys[scancode / 64].fetch_or(uint64_t{1} << (scancode % 64), std::memory_order_relaxed);
+  }
+}
+
+void note_mouse_down(const uint8_t button) noexcept {
+  if (button >= 1 && button <= 32) {
+    g_tappedMouse.fetch_or(1u << (button - 1), std::memory_order_relaxed);
+  }
+}
+
+InputTaps take_taps() noexcept {
+  InputTaps taps;
+  for (size_t i = 0; i < taps.keys.size(); ++i) {
+    taps.keys[i] = g_tappedKeys[i].exchange(0, std::memory_order_relaxed);
+  }
+  taps.mouse = g_tappedMouse.exchange(0, std::memory_order_relaxed);
+  return taps;
 }
 
 void shutdown() noexcept {

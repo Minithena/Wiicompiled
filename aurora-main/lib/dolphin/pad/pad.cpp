@@ -331,13 +331,13 @@ bool is_native_binding_pressed(SDL_Gamepad* gamepad, u32 binding) {
   return binding < SDL_GAMEPAD_BUTTON_COUNT &&
          SDL_GetGamepadButton(gamepad, static_cast<SDL_GamepadButton>(binding));
 }
-bool is_mouse_button_pressed(const s32 scancode) {
+bool is_mouse_button_pressed(const s32 scancode, const aurora::input::InputTaps& taps) {
   const int32_t buttonNum = -(scancode + 1);
   if (buttonNum < 1 || buttonNum > 5) {
     return false;
   }
   float x, y;
-  const auto buttons = SDL_GetMouseState(&x, &y);
+  const auto buttons = SDL_GetMouseState(&x, &y) | taps.mouse;
   return (buttons & 1u << (buttonNum - 1)) != 0u;
 }
 } // namespace
@@ -720,6 +720,8 @@ u32 PADRead(PADStatus* status) {
 
   int numKeys = 0;
   const bool* kbState = SDL_GetKeyboardState(&numKeys);
+  // A key tapped since the last read counts as held for this one read.
+  const aurora::input::InputTaps taps = aurora::input::take_taps();
   const bool inputBlocked = g_blockPAD.load(std::memory_order_acquire);
   const bool captureHeldInput = g_suppressHeldOnRead && !inputBlocked;
   g_suppressHeldOnRead = false;
@@ -739,10 +741,11 @@ u32 PADRead(PADStatus* status) {
     status[i].err = PAD_ERR_NONE;
     if (g_keyboardBindings[i].m_mappingsSet && SDL_GetKeyboardFocus() != nullptr) {
       std::ranges::for_each(
-          g_keyboardBindings[i].m_buttonMapping, [&kbState, &numKeys, &i, &status](const PADKeyButtonBinding& mapping) {
-            if (mapping.scancode > PAD_KEY_INVALID && mapping.scancode < numKeys && kbState[mapping.scancode]) {
+          g_keyboardBindings[i].m_buttonMapping, [&kbState, &numKeys, &taps, &i, &status](const PADKeyButtonBinding& mapping) {
+            if (mapping.scancode > PAD_KEY_INVALID && mapping.scancode < numKeys &&
+                (kbState[mapping.scancode] || taps.key(mapping.scancode))) {
               status[i].button |= mapping.padButton;
-            } else if (is_mouse_scancode(mapping.scancode) && is_mouse_button_pressed(mapping.scancode)) {
+            } else if (is_mouse_scancode(mapping.scancode) && is_mouse_button_pressed(mapping.scancode, taps)) {
               status[i].button |= mapping.padButton;
             }
           });
@@ -751,9 +754,9 @@ u32 PADRead(PADStatus* status) {
       for (const auto& binding : g_keyboardBindings[i].m_axisMapping) {
         bool pressed = false;
         if (binding.scancode > PAD_KEY_INVALID) {
-          pressed = binding.scancode < numKeys && kbState[binding.scancode];
+          pressed = binding.scancode < numKeys && (kbState[binding.scancode] || taps.key(binding.scancode));
         } else if (is_mouse_scancode(binding.scancode)) {
-          pressed = is_mouse_button_pressed(binding.scancode);
+          pressed = is_mouse_button_pressed(binding.scancode, taps);
         }
         if (!pressed) {
           continue;

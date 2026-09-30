@@ -260,6 +260,9 @@ void process_event(SDL_Event& event) {
 
   switch (event.type) {
   case SDL_EVENT_KEY_DOWN:
+    if (!event.key.repeat) {
+      input::note_key_down(event.key.scancode);
+    }
     if (is_alt_enter_event(event)) {
       set_display_mode(get_fullscreen() ? AURORA_DISPLAY_MODE_WINDOWED : AURORA_DISPLAY_MODE_BORDERLESS);
       g_nativeResizePending.store(true, std::memory_order_release);
@@ -312,6 +315,9 @@ void process_event(SDL_Event& event) {
     });
     break;
   }
+  case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    input::note_mouse_down(event.button.button);
+    break;
   case SDL_EVENT_MOUSE_WHEEL:
     input::set_mouse_scroll(event.wheel.x, event.wheel.y);
     break;

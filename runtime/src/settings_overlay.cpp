@@ -1492,6 +1492,14 @@ void HandleEvents(const AuroraEvent* events) noexcept {
             CompleteRebind(g_rebind.kind == RebindKind::Controller ? PAD_NATIVE_BUTTON_DISABLED
                                                                   : static_cast<uint32_t>(PAD_KEY_INVALID));
         }
+        // Keys are also caught here, not only by the per-frame state check in the rebind popup,
+        // so a tap shorter than a frame still binds. The key must not then act as a shortcut.
+        if (g_rebind.active && g_rebind.kind != RebindKind::Controller &&
+            ev->sdl.type == SDL_EVENT_KEY_DOWN && !ev->sdl.key.repeat &&
+            ev->sdl.key.scancode != SDL_SCANCODE_F10 && ev->sdl.key.scancode < SDL_SCANCODE_COUNT) {
+            CompleteRebind(static_cast<uint32_t>(ev->sdl.key.scancode));
+            continue;
+        }
         if (!g_rebind.active && IsToggleKey(ev->sdl, SDL_SCANCODE_F10)) {
             SetTopBarVisible(!g_topBarVisible);
             ApplyInputBlockState();

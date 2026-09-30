@@ -69,5 +69,18 @@ extern absl::flat_hash_map<Uint32, GameController> g_GameControllers;
 void set_mouse_scroll(float scrollX, float scrollY) noexcept;
 void get_mouse_scroll(float* scrollX, float* scrollY) noexcept;
 
+// Key and mouse-button presses since the last take_taps(). PADRead samples the keyboard once per
+// frame, so a press released before the next frame would otherwise never reach the game.
+struct InputTaps {
+  std::array<uint64_t, (SDL_SCANCODE_COUNT + 63) / 64> keys{};
+  uint32_t mouse = 0; // bit (n - 1) for SDL mouse button n
+  bool key(int scancode) const noexcept {
+    return scancode >= 0 && scancode < SDL_SCANCODE_COUNT && (keys[scancode / 64] >> (scancode % 64) & 1) != 0;
+  }
+};
+void note_key_down(SDL_Scancode scancode) noexcept;
+void note_mouse_down(uint8_t button) noexcept;
+InputTaps take_taps() noexcept;
+
 void shutdown() noexcept;
 } // namespace aurora::input
