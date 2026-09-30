@@ -31,12 +31,35 @@
 </div>
 <script>
   const params = new URLSearchParams(location.search);
+
+  // "?log": forward console output and errors to the local server (tools/serve.py prints them),
+  // for debugging browsers whose developer tools are not at hand.
+  if (params.has('log')) {
+    let pending = [];
+    const forward = (level, args) => {
+      pending.push(level + ' ' + args.map((a) => a instanceof Error ? a.stack || String(a)
+                                                     : typeof a === 'string' ? a : JSON.stringify(a)).join(' '));
+    };
+    for (const level of ['log', 'warn', 'error']) {
+      const original = console[level].bind(console);
+      console[level] = (...args) => { forward(level, args); original(...args); };
+    }
+    addEventListener('error', (e) => forward('uncaught', [e.message + ' @ ' + e.filename + ':' + e.lineno]));
+    addEventListener('unhandledrejection', (e) => forward('unhandled', [e.reason]));
+    setInterval(() => {
+      if (!pending.length) return;
+      const body = pending.join('\n');
+      pending = [];
+      fetch('/log', {method: 'POST', body}).catch(() => {});
+    }, 500);
+    console.log('log forwarding on: ' + navigator.userAgent);
+  }
   const statusEl = document.getElementById('status');
   const startButton = document.getElementById('start');
   const missing = [];
   if (!self.crossOriginIsolated) missing.push('cross-origin isolation (serve with tools/serve.py)');
   if (!('gpu' in navigator)) missing.push('WebGPU');
-  if (!('Suspending' in WebAssembly)) missing.push('WebAssembly JSPI (use a current Chrome)');
+  if (!('Suspending' in WebAssembly)) missing.push('WebAssembly JSPI (Chrome 137+ or Firefox 153+)');
 
   var Module = {
     canvas: document.getElementById('canvas'),
