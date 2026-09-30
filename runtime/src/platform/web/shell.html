@@ -39,6 +39,14 @@
         border-radius: 5px; padding: 3px 6px; white-space: nowrap; }
   kbd.unbound { color: var(--muted); border-style: dashed; }
   .note { color: var(--muted); font-size: 12px; margin: 18px 0 0; }
+  #room-panel { border-bottom: 1px solid var(--line); padding-bottom: 16px; margin-bottom: 16px; }
+  #room-panel h2 { margin-bottom: 10px; }
+  #room-panel input { box-sizing: border-box; width: 100%; background: var(--key-bg); color: var(--text);
+    border: 1px solid var(--key-line); border-radius: 6px; padding: 8px; font: inherit; margin: 8px 0; }
+  #room-panel .room-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  #room-panel button:disabled { opacity: .5; cursor: default; }
+  #room-panel .note { margin-top: 10px; }
+  #room-panel a { color: var(--muted); }
   button.link { font: inherit; font-size: 12px; color: var(--muted); background: none; border: 1px solid var(--line);
                 border-radius: 6px; padding: 4px 8px; cursor: pointer; }
   button.link:hover { color: var(--text); }
@@ -71,6 +79,25 @@
     </div>
   </div>
   <aside id="controls" aria-label="Controls">
+    <section id="room-panel" aria-label="Online room">
+      <h2>Play with friends</h2>
+      <div id="room-setup">
+        <button id="create-room" class="link">Create room</button>
+        <label for="room-code" class="note">Or enter an invite code</label>
+        <input id="room-code" placeholder="Room code" maxlength="32" autocapitalize="off" spellcheck="false">
+        <button id="join-room" class="link">Join room</button>
+      </div>
+      <div id="room-invite" hidden>
+        <label for="invite-link">Invite link</label>
+        <input id="invite-link" readonly aria-label="Invite link">
+        <div class="room-actions">
+          <button id="copy-invite" class="link">Copy invite</button>
+          <button id="leave-room" class="link">Leave room &amp; reload</button>
+        </div>
+      </div>
+      <p id="room-message" class="note" role="status">Choose a room before starting the game.</p>
+      <p class="note"><a href="https://github.com/Minithena/mariokartwebtest/tree/claude/vigilant-ride-auy5y2/tools/cloudflare/rooms" target="_blank" rel="noopener noreferrer">Room server source</a></p>
+    </section>
     <div class="head">
       <h2>Controls</h2>
       <button id="hide-controls" class="link">Hide</button>
@@ -104,6 +131,67 @@
 </div>
 <script>
   const params = new URLSearchParams(location.search);
+
+  // Online room (tools/cloudflare/rooms): "?room=<code>" from an invite link, or a full ws:// URL
+  // for a room server run locally with `wrangler dev`.
+  const ROOMS_HOST = 'mkw-rooms.athenaaa.workers.dev';
+  const localRoomServer = ['127.0.0.1', 'localhost'].includes(location.hostname);
+  const roomsApi = localRoomServer ? 'http://127.0.0.1:8787' : `https://${ROOMS_HOST}`;
+  const roomsSocket = roomsApi.replace(/^http/, 'ws');
+  const roomParam = params.get('room') || '';
+  const roomUrl = /^wss?:\/\//.test(roomParam) ? roomParam
+    : /^[a-z0-9]{6,32}$/.test(roomParam) ? `${roomsSocket}/v1/rooms/${roomParam}/ws` : '';
+
+  const roomMessage = document.getElementById('room-message');
+  const changeRoom = (code) => {
+    const next = new URL(location.href);
+    if (code) next.searchParams.set('room', code); else next.searchParams.delete('room');
+    next.searchParams.delete('resetsave');
+    location.href = next.href;
+  };
+  if (roomUrl) {
+    document.getElementById('room-setup').hidden = true;
+    document.getElementById('room-invite').hidden = false;
+    const invite = new URL(location.href);
+    for (const name of ['log', 'netlog', 'muted', 'resetsave']) invite.searchParams.delete(name);
+    document.getElementById('invite-link').value = invite.href;
+    roomMessage.textContent = 'In the game, everyone chooses Nintendo WFC → Worldwide → VS Race. Only players with this invite can match. Up to 12 players; keep the game open.';
+  } else if (roomParam) {
+    roomMessage.textContent = 'That room code is not valid. Enter a code or create a room.';
+  }
+  document.getElementById('join-room').addEventListener('click', () => {
+    const code = document.getElementById('room-code').value.trim().toLowerCase();
+    if (!/^[a-z0-9]{6,32}$/.test(code)) {
+      roomMessage.textContent = 'Enter the 12-character code from your friend’s invite.';
+      return;
+    }
+    changeRoom(code);
+  });
+  document.getElementById('create-room').addEventListener('click', async (event) => {
+    event.currentTarget.disabled = true;
+    roomMessage.textContent = 'Creating a room…';
+    try {
+      const response = await fetch(`${roomsApi}/v1/rooms`, { method: 'POST', signal: AbortSignal.timeout(10000) });
+      if (!response.ok) throw new Error('Room service unavailable');
+      const { code } = await response.json();
+      if (!/^[a-z0-9]{12}$/.test(code)) throw new Error('Invalid room response');
+      changeRoom(code);
+    } catch {
+      document.getElementById('create-room').disabled = false;
+      roomMessage.textContent = 'Could not create a room. Please try again.';
+    }
+  });
+  document.getElementById('copy-invite').addEventListener('click', async () => {
+    const field = document.getElementById('invite-link');
+    try {
+      await navigator.clipboard.writeText(field.value);
+      document.getElementById('copy-invite').textContent = 'Copied';
+    } catch {
+      field.focus(); field.select();
+      roomMessage.textContent = 'Copy the selected invite link and send it to your friends.';
+    }
+  });
+  document.getElementById('leave-room').addEventListener('click', () => changeRoom(''));
 
   // "?log": forward console output and errors to the local server (tools/serve.py prints them),
   // for debugging browsers whose developer tools are not at hand.
@@ -139,6 +227,8 @@
     preRun: [() => {
       if (params.has('muted')) ENV.MKW_WEB_MUTED = '1';
       if (params.has('resetsave')) ENV.MKW_WEB_RESET_SAVE = '1';
+      if (roomUrl) ENV.MKW_WEB_ROOM = roomUrl;
+      if (params.has('netlog')) ENV.MKW_WEB_NETLOG = '1';
     }],
     print: (text) => console.log(text),
     printErr: (text) => console.error(text),
@@ -205,6 +295,7 @@
 
   // Browsers only start audio after a user gesture, so the game waits for this click.
   startButton.addEventListener('click', () => {
+    for (const id of ['create-room', 'join-room', 'room-code']) document.getElementById(id).disabled = true;
     document.getElementById('overlay').hidden = true;
     Module.canvas.focus();
     Module.callMain([]);

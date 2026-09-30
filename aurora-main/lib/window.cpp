@@ -34,6 +34,7 @@ extern "C" void Android_UnlockActivityMutex(void);
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <vector>
 
 #include "dolphin/vi/vi_internal.hpp"
@@ -592,6 +593,16 @@ bool is_paused() noexcept {
   if (!is_presentable()) {
     return true;
   }
+#ifdef __EMSCRIPTEN__
+  // A room cannot pause when its tab loses focus: its peers still expect race packets.
+  // OffscreenCanvas can render in a hidden tab. Entering the paused event wait instead
+  // makes every GX frame retry block for 100 ms and eventually times out matchmaking.
+  static const bool online = [] {
+    const char* room = std::getenv("MKW_WEB_ROOM");
+    return room != nullptr && *room != '\0';
+  }();
+  if (online) return false;
+#endif
   const auto flags = SDL_GetWindowFlags(g_window);
   if ((flags & SDL_WINDOW_HIDDEN) != 0u) {
     return true;

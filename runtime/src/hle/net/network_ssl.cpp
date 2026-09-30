@@ -95,6 +95,11 @@ static bool IsRetroNasSslHost(std::string_view hostname) {
 }
 
 static bool IsRetroPlaintextSslHost(std::string_view hostname) {
+#ifdef __EMSCRIPTEN__
+    // The web build's only server is the online room's stand-in, which speaks plain HTTP.
+    (void)hostname;
+    return true;
+#endif
     if (IsRetroNasSslHost(hostname)) {
         return true;
     }

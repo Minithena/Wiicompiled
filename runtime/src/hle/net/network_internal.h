@@ -58,6 +58,12 @@
 #include <unistd.h>
 #endif
 
+#ifdef __EMSCRIPTEN__
+// Browsers have no sockets: the calls below go to the room's virtual network instead.
+#define WEB_VNET_REDIRECT
+#include "../../platform/web/web_vnet.h"
+#endif
+
 namespace NetworkHle {
 
 enum class DeviceKind {

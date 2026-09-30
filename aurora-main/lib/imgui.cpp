@@ -195,7 +195,7 @@ void render_frame_data() noexcept {
   g_frameDataBuilt = true;
 }
 
-void render(const wgpu::RenderPassEncoder& pass) noexcept {
+void render(const wgpu::RenderPassEncoder& pass, uint32_t targetWidth, uint32_t targetHeight) noexcept {
   ZoneScoped;
   render_frame_data();
 
@@ -206,9 +206,19 @@ void render(const wgpu::RenderPassEncoder& pass) noexcept {
     ImGui_ImplSDLRenderer3_RenderDrawData(data, renderer);
     SDL_RenderPresent(renderer);
   } else {
+    // A resize can arrive after NewFrame (and snapshots can be replayed on a new surface).
+    // The WGPU backend derives both its viewport and scissor bounds from these dimensions,
+    // so they must describe the actual attachment, not the window at the start of the frame.
+    if (targetWidth == 0 || targetHeight == 0 || data->DisplaySize.x <= 0.f || data->DisplaySize.y <= 0.f) {
+      return;
+    }
+    const ImVec2 savedScale = data->FramebufferScale;
+    data->FramebufferScale = {static_cast<float>(targetWidth) / data->DisplaySize.x,
+                              static_cast<float>(targetHeight) / data->DisplaySize.y};
     pass.PushDebugGroup("Aurora: Dear Imgui");
     ImGui_ImplWGPU_RenderDrawData(data, pass.Get());
     pass.PopDebugGroup();
+    data->FramebufferScale = savedScale;
   }
 }
 

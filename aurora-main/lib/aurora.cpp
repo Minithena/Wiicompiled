@@ -1258,7 +1258,7 @@ void encode_presentation_snapshot(const wgpu::CommandEncoder& encoder,
     const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
     pass.SetViewport(0.f, 0.f, static_cast<float>(image.texture.size.width),
                      static_cast<float>(image.texture.size.height), 0.f, 1.f);
-    imgui::render(pass);
+    imgui::render(pass, image.texture.size.width, image.texture.size.height);
     pass.End();
   }
 }

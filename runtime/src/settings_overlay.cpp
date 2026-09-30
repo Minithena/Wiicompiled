@@ -11,6 +11,7 @@
 #include "wii_remote_input.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_keyboard.h>
@@ -41,6 +42,7 @@
 
 #if defined(__EMSCRIPTEN__)
 #include <emscripten/em_asm.h>
+#include "platform/web/web_vnet.h"
 #endif
 
 #include <dolphin/pad.h>
@@ -1590,6 +1592,17 @@ void Draw() noexcept {
     PersistDisplayModeIfChanged();
     UpdateCursorAutoHide();
     UpdateBootShaderState();
+#if defined(__EMSCRIPTEN__)
+    PublishWebBindings();
+    WebVnet::Pump();
+#endif
+    // No frame begins while the window cannot present (a hidden browser tab, a minimised window),
+    // so there is no ImGui frame to draw into; the game keeps running, the overlay just waits.
+    const ImGuiContext* imgui = ImGui::GetCurrentContext();
+    if (imgui == nullptr || !imgui->WithinFrameScope) {
+        ApplyInputBlockState();
+        return;
+    }
     if (!StartupScreenVisible()) {
         DrawShaderCompilationStatus();
     }
@@ -1599,9 +1612,6 @@ void Draw() noexcept {
     controller_mapping_wizard::Draw();
     ApplyInputBlockState();
     DrawStartupScreen();
-#if defined(__EMSCRIPTEN__)
-    PublishWebBindings();
-#endif
 }
 
 bool StartupScreenVisible() noexcept {

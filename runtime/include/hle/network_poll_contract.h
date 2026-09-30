@@ -14,6 +14,11 @@
 #include <sys/socket.h>
 #endif
 
+#ifdef __EMSCRIPTEN__
+// The browser build's sockets are virtual (runtime/src/platform/web/web_vnet.h).
+extern "C" int vnet_poll(pollfd* fds, nfds_t count, int timeoutMs);
+#endif
+
 namespace NetworkPollContract {
 
 constexpr size_t kMaxDescriptors = 24;
@@ -146,6 +151,8 @@ int ProbeNow(std::vector<CopiedDescriptor>& descriptors, IsStillValid&& isStillV
 
 #ifdef _WIN32
     const int result = WSAPoll(active.data(), static_cast<ULONG>(activeCount), 0);
+#elif defined(__EMSCRIPTEN__)
+    const int result = vnet_poll(active.data(), activeCount, 0);
 #else
     const int result = poll(active.data(), activeCount, 0);
 #endif
