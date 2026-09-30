@@ -10,6 +10,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <limits>
@@ -362,7 +364,39 @@ static PipelineCacheWrite make_pipeline_cache_write(ShaderType type, PipelineRef
   return write;
 }
 
+#ifdef __EMSCRIPTEN__
+// The web has no writable SQLite cache. Pipelines missing from the bundled seed are appended to a
+// small log in browser storage instead and prewarmed with the seed on the next visit.
+// Record: u32 type, u32 config version, u64 hash, u32 config size, config bytes.
+constexpr char WebPipelineLogMagic[8] = {'A', 'U', 'R', 'P', 'L', 'O', 'G', '1'};
+static std::FILE* g_webPipelineLog = nullptr;
+static absl::flat_hash_set<PipelineRef> g_webKnownPipelines;
+
+static void append_web_pipeline_record(const PipelineCacheWrite& write) {
+  if (g_webPipelineLog == nullptr || !g_webKnownPipelines.insert(write.hash).second) {
+    return;
+  }
+  const uint32_t header[2] = {underlying(write.type), write.configVersion};
+  const uint64_t hash = write.hash;
+  const auto size = static_cast<uint32_t>(write.config.size());
+  const bool ok = std::fwrite(header, sizeof(header), 1, g_webPipelineLog) == 1 &&
+                  std::fwrite(&hash, sizeof(hash), 1, g_webPipelineLog) == 1 &&
+                  std::fwrite(&size, sizeof(size), 1, g_webPipelineLog) == 1 &&
+                  (size == 0 || std::fwrite(write.config.data(), size, 1, g_webPipelineLog) == 1) &&
+                  std::fflush(g_webPipelineLog) == 0;
+  if (!ok) {
+    Log.warn("Failed to record a new pipeline in browser storage; not recording more this session");
+    std::fclose(g_webPipelineLog);
+    g_webPipelineLog = nullptr;
+  }
+}
+#endif
+
 static void enqueue_pipeline_cache_write(PipelineCacheWrite write) {
+#ifdef __EMSCRIPTEN__
+  append_web_pipeline_record(write);
+  return;
+#endif
   if (g_pipelineCacheBroken || g_pipelineCacheDb == nullptr) {
     return;
   }
@@ -1052,6 +1086,33 @@ static size_t pipeline_worker_count() {
   return std::clamp(availableWorkers, size_t{1}, MaxPipelineWorkers);
 }
 
+// Queues one stored pipeline configuration for prewarm after checking it still matches this build.
+template <typename PipelineConfig, typename CreateFn>
+static void preload_cached_pipeline(ShaderType type, uint32_t configVersion, const CreateFn& create,
+                                    PipelineRef storedHash, const uint8_t* configBlob, int configSize,
+                                    uint32_t firstFrameUsed) {
+  if (configSize != static_cast<int>(sizeof(PipelineConfig)) || (configSize != 0 && configBlob == nullptr)) {
+    return;
+  }
+  if (xxh3_hash_s(configBlob, static_cast<size_t>(configSize), static_cast<HashType>(type)) != storedHash) {
+    Log.warn("Skipping cached pipeline configuration with mismatched content hash");
+    return;
+  }
+  PipelineConfig config;
+  std::memcpy(&config, configBlob, sizeof(config));
+  if (config.version != configVersion) {
+    return;
+  }
+  if constexpr (std::is_same_v<PipelineConfig, gx::PipelineConfig>) {
+    if (!gx::valid_pipeline_config(config)) {
+      Log.warn("Skipping invalid cached GX pipeline configuration");
+      return;
+    }
+  }
+
+  find_pipeline_impl(type, config, [=] { return create(config); }, false, firstFrameUsed);
+}
+
 template <typename PipelineConfig, typename CreateFn>
 static void load_pipeline_cache_entries(sqlite3* db, sqlite3_stmt* stmt, ShaderType type, uint32_t configVersion,
                                         CreateFn&& create) {
@@ -1069,30 +1130,11 @@ static void load_pipeline_cache_entries(sqlite3* db, sqlite3_stmt* stmt, ShaderT
   }
 
   while ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
-    const auto storedHash = static_cast<PipelineRef>(sqlite3_column_int64(stmt, 0));
-    const auto* configBlob = static_cast<const uint8_t*>(sqlite3_column_blob(stmt, 1));
-    const auto configSize = sqlite3_column_bytes(stmt, 1);
-    const auto firstFrameUsed = static_cast<uint32_t>(sqlite3_column_int64(stmt, 2));
-    if (configSize != static_cast<int>(sizeof(PipelineConfig)) || (configSize != 0 && configBlob == nullptr)) {
-      continue;
-    }
-    if (xxh3_hash_s(configBlob, static_cast<size_t>(configSize), static_cast<HashType>(type)) != storedHash) {
-      Log.warn("Skipping cached pipeline configuration with mismatched content hash");
-      continue;
-    }
-    PipelineConfig config;
-    std::memcpy(&config, configBlob, sizeof(config));
-    if (config.version != configVersion) {
-      continue;
-    }
-    if constexpr (std::is_same_v<PipelineConfig, gx::PipelineConfig>) {
-      if (!gx::valid_pipeline_config(config)) {
-        Log.warn("Skipping invalid cached GX pipeline configuration");
-        continue;
-      }
-    }
-
-    find_pipeline_impl(type, config, [=] { return create(config); }, false, firstFrameUsed);
+    preload_cached_pipeline<PipelineConfig>(type, configVersion, create,
+                                            static_cast<PipelineRef>(sqlite3_column_int64(stmt, 0)),
+                                            static_cast<const uint8_t*>(sqlite3_column_blob(stmt, 1)),
+                                            sqlite3_column_bytes(stmt, 1),
+                                            static_cast<uint32_t>(sqlite3_column_int64(stmt, 2)));
   }
 
   if (ret != SQLITE_DONE) {
@@ -1155,7 +1197,74 @@ static void load_seed_pipelines() {
   sqlite3_finalize(stmt);
   sqlite3_close(seedDb);
   Log.info("Queued {} bundled pipelines for prewarm", queuedPipelines.load());
-  begin_pipeline_prewarm();
+}
+
+// Queues the pipelines this browser recorded in earlier visits and opens the log for new ones.
+// A record cut short (the tab closed mid-write) ends the log; the file is rewritten without it.
+static void load_web_pipeline_log() {
+  const auto path =
+      fs_path_to_string(fs_path_from_string(g_config.pipelineCachePath) / "web_pipelines.bin");
+  std::vector<uint8_t> data;
+  if (std::FILE* in = std::fopen(path.c_str(), "rb")) {
+    uint8_t chunk[65536];
+    size_t read;
+    while ((read = std::fread(chunk, 1, sizeof(chunk), in)) > 0) {
+      data.insert(data.end(), chunk, chunk + read);
+    }
+    std::fclose(in);
+  }
+
+  size_t pos = 0;
+  uint32_t records = 0;
+  if (data.size() >= sizeof(WebPipelineLogMagic) &&
+      std::memcmp(data.data(), WebPipelineLogMagic, sizeof(WebPipelineLogMagic)) == 0) {
+    pos = sizeof(WebPipelineLogMagic);
+    constexpr size_t HeaderSize = 4 + 4 + 8 + 4;
+    while (data.size() - pos >= HeaderSize) {
+      uint32_t type, configVersion, size;
+      uint64_t hash;
+      std::memcpy(&type, &data[pos], 4);
+      std::memcpy(&configVersion, &data[pos + 4], 4);
+      std::memcpy(&hash, &data[pos + 8], 8);
+      std::memcpy(&size, &data[pos + 16], 4);
+      if (data.size() - pos - HeaderSize < size) {
+        break;
+      }
+      const uint8_t* blob = &data[pos + HeaderSize];
+      if (type == underlying(ShaderType::Clear) && configVersion == clear::ClearPipelineConfigVersion) {
+        preload_cached_pipeline<clear::PipelineConfig>(ShaderType::Clear, configVersion, clear::create_pipeline,
+                                                       hash, blob, static_cast<int>(size), 0);
+      } else if (type == underlying(ShaderType::GX) && configVersion == gx::GXPipelineConfigVersion) {
+        preload_cached_pipeline<gx::PipelineConfig>(ShaderType::GX, configVersion, gx::create_pipeline, hash,
+                                                    blob, static_cast<int>(size), 0);
+      }
+      pos += HeaderSize + size;
+      ++records;
+    }
+  }
+
+  // Everything queued so far (seed and log) is already known and needs no new record.
+  g_webKnownPipelines = g_pendingPipelines;
+  const bool rewrite = pos != data.size() || pos == 0;
+  g_webPipelineLog = std::fopen(path.c_str(), rewrite ? "wb" : "ab");
+  if (g_webPipelineLog == nullptr) {
+    Log.warn("Cannot open '{}': new pipelines will not be remembered", path);
+    return;
+  }
+  if (rewrite) {
+    const bool ok = std::fwrite(WebPipelineLogMagic, sizeof(WebPipelineLogMagic), 1, g_webPipelineLog) == 1 &&
+                    (pos <= sizeof(WebPipelineLogMagic) ||
+                     std::fwrite(&data[sizeof(WebPipelineLogMagic)], pos - sizeof(WebPipelineLogMagic), 1,
+                                 g_webPipelineLog) == 1) &&
+                    std::fflush(g_webPipelineLog) == 0;
+    if (!ok) {
+      std::fclose(g_webPipelineLog);
+      g_webPipelineLog = nullptr;
+      Log.warn("Cannot write '{}': new pipelines will not be remembered", path);
+      return;
+    }
+  }
+  Log.info("Queued {} pipelines recorded by this browser", records);
 }
 #endif
 
@@ -1227,6 +1336,8 @@ void initialize_pipeline_cache() {
   // recompiles pipelines each session, prewarmed from the bundled seed. With no DB open, every cache
   // write is a no-op.
   load_seed_pipelines();
+  load_web_pipeline_log();
+  begin_pipeline_prewarm();
   g_pipelineCacheBroken = true;
 #else
   load_pipeline_cache();
@@ -1253,6 +1364,13 @@ void shutdown_pipeline_cache() {
 
   stop_pipeline_cache_writer();
   pipeline_cache_abort();
+#ifdef __EMSCRIPTEN__
+  if (g_webPipelineLog != nullptr) {
+    std::fclose(g_webPipelineLog);
+    g_webPipelineLog = nullptr;
+  }
+  g_webKnownPipelines.clear();
+#endif
   g_pipelineCacheBroken = false;
   g_pipelineFrameActive = false;
   g_pipelinesPerFrame = 0;
