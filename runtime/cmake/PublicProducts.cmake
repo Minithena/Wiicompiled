@@ -295,6 +295,7 @@ function(mkw_configure_product target)
             -sWASMFS -sFORCE_FILESYSTEM -sEXIT_RUNTIME=0 -sASSERTIONS=1 --profiling-funcs
             -sINVOKE_RUN=0 -sEXPORTED_RUNTIME_METHODS=callMain,ENV
             "--shell-file=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/shell.html"
+            "--pre-js=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/shader_diagnostics.js"
             "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/wii@/app/wii_bootstrap"
             "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/dsp/dsp_coef.bin@/app/dsp_coef.bin")
         return()

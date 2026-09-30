@@ -1,3 +1,4 @@
+#include <regex>
 #include "../gfx/common.hpp"
 
 #include "../internal.hpp"
@@ -667,6 +668,52 @@ static u32 attr_comp_type_size(u8 compType) noexcept {
   }
 }
 
+#if defined(__EMSCRIPTEN__)
+// The vertex-fetch helpers take `p: ptr<storage, array<u32>>`, which needs WGSL's
+// unrestricted_pointer_parameters feature: Chrome has it, Firefox (and core WGSL) do not. They
+// are only ever called with &vbuf or &abuf, so give each helper one copy per buffer with the
+// pointer replaced by that global, and retarget every call.
+static std::string specialize_storage_pointer_params(std::string source) {
+  static constexpr std::string_view kParam = "(p: ptr<storage, array<u32>>, ";
+  std::string helpers;
+  std::string rest;
+  size_t cursor = 0;
+  size_t insertAt = std::string::npos;
+  for (;;) {
+    const size_t param = source.find(kParam, cursor);
+    if (param == std::string::npos) break;
+    const size_t start = source.rfind("\nfn ", param) + 1;
+    const size_t end = source.find("\n}\n", param) + 3;
+    rest.append(source, cursor, start - cursor);
+    if (insertAt == std::string::npos) insertAt = rest.size();
+    helpers.append(source, start, end - start);
+    cursor = end;
+  }
+  rest.append(source, cursor, std::string::npos);
+  if (helpers.empty()) return source;
+
+  static const std::regex kDefinition(R"(\bfn (\w+)\(p: ptr<storage, array<u32>>, )");
+  static const std::regex kInnerCall(R"(\b(\w+)\(p, )");
+  static const std::regex kIndex(R"(\bp\[)");
+  static const std::regex kCall(R"(\b(\w+)\(&(vbuf|abuf), )");
+  std::string specialized;
+  for (const char* buffer : {"vbuf", "abuf"}) {
+    std::string copy = std::regex_replace(helpers, kDefinition, std::string("fn $1_") + buffer + "(");
+    copy = std::regex_replace(copy, kInnerCall, std::string("$1_") + buffer + "(");
+    copy = std::regex_replace(copy, kIndex, std::string(buffer) + "[");
+    specialized += copy;
+  }
+  rest.insert(insertAt, specialized);
+  return std::regex_replace(rest, kCall, "$1_$2(");
+}
+#endif
+
+// ubuf.array_start holds 12 u32s as array<vec4u, 3>: core WGSL requires a 16-byte array stride
+// in uniform buffers (Firefox enforces it; Chrome relaxes it), and the byte layout is the same.
+static std::string array_start(u32 index) {
+  return fmt::format("ubuf.array_start[{}u][{}u]", index / 4u, index % 4u);
+}
+
 static std::string offset_plus(std::string_view offs, u32 add) {
   if (add == 0) {
     return std::string(offs);
@@ -689,13 +736,13 @@ auto normal_group_load(const ShaderConfig& config, u8 group, std::string_view vi
 
   if (mapping.attrType == GX_INDEX8) {
     const std::string indexOffs = offset_plus(offs, mapping.nrmIndexCount == 3 ? group : 0);
-    offs = fmt::format("ubuf.array_start[{}] + raw_fetch_u8_1(&{}, {}) * {}u + {}u", GX_VA_NRM - GX_VA_POS, buf,
+    offs = fmt::format("{} + raw_fetch_u8_1(&{}, {}) * {}u + {}u", array_start(GX_VA_NRM - GX_VA_POS), buf,
                        indexOffs, mapping.stride, groupOffset);
     buf = "abuf"sv;
     le = mapping.le;
   } else if (mapping.attrType == GX_INDEX16) {
     const std::string indexOffs = offset_plus(offs, mapping.nrmIndexCount == 3 ? group * 2u : 0);
-    offs = fmt::format("ubuf.array_start[{}] + raw_fetch_u16_1(&{}, {}, {}) * {}u + {}u", GX_VA_NRM - GX_VA_POS,
+    offs = fmt::format("{} + raw_fetch_u16_1(&{}, {}, {}) * {}u + {}u", array_start(GX_VA_NRM - GX_VA_POS),
                        buf, indexOffs, le, mapping.stride, groupOffset);
     buf = "abuf"sv;
     le = mapping.le;
@@ -715,12 +762,12 @@ auto attr_load(const ShaderConfig& config, GXAttr attr, std::string_view vidx) -
   auto offs = fmt::format("ubuf.vtx_start + {} * {}u + {}u", vidx, config.vtxStride, mapping.offset);
   auto le = false; // Vertex buffer is always big endian (for now)
   if (mapping.attrType == GX_INDEX8) {
-    offs = fmt::format("ubuf.array_start[{}] + raw_fetch_u8_1(&{}, {}) * {}u", attr - GX_VA_POS, buf, offs,
+    offs = fmt::format("{} + raw_fetch_u8_1(&{}, {}) * {}u", array_start(attr - GX_VA_POS), buf, offs,
                        mapping.stride);
     buf = "abuf"sv;
     le = mapping.le;
   } else if (mapping.attrType == GX_INDEX16) {
-    offs = fmt::format("ubuf.array_start[{}] + raw_fetch_u16_1(&{}, {}, {}) * {}u", attr - GX_VA_POS, buf, offs, le,
+    offs = fmt::format("{} + raw_fetch_u16_1(&{}, {}, {}) * {}u", array_start(attr - GX_VA_POS), buf, offs, le,
                        mapping.stride);
     buf = "abuf"sv;
     le = mapping.le;
@@ -1663,7 +1710,7 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
         "    return out;";
   }
 
-  const auto shaderSource = fmt::format(R"""(
+  auto shaderSource = fmt::format(R"""(
 fn bswap32(v: u32, le: bool) -> u32 {{
   if (le) {{
     return v;
@@ -2052,7 +2099,7 @@ struct Uniform {{
     render_viewport_size: vec2f,
     logical_viewport_size: vec2f,
     pad: vec2u,
-    array_start: array<u32, 12>,{0}
+    array_start: array<vec4u, 3>,{0}
 }};
 @group(0) @binding(0)
 var<storage, read> vbuf: array<u32>;
@@ -2081,6 +2128,9 @@ fn fs_main(in: VertexOutput) -> {9} {{{6}{5}
                                         uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
                                         fragmentFnPre, vtxXfrAttrsPre, uniformPre, fragmentReturnType,
                                         fragmentReturn);
+#if defined(__EMSCRIPTEN__)
+  shaderSource = specialize_storage_pointer_params(std::move(shaderSource));
+#endif
   wgpu::ShaderSourceWGSL wgslDescriptor{};
   wgslDescriptor.code = shaderSource.c_str();
   const auto label = fmt::format("GX Shader {:x}", hash);

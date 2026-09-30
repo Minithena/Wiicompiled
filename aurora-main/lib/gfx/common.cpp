@@ -1551,8 +1551,10 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
       // "in front" geometry silently vanishes. A full [0,1] viewport is unaffected either way,
       // which is why this only broke specific elements, not the whole scene. Matches upstream
       // aurora's apply_viewport (lib/gfx/encoding.cpp) exactly.
-      const float minDepth = gx::UseReversedZ ? 1.0f - vp.zfar : vp.znear;
-      const float maxDepth = gx::UseReversedZ ? 1.0f - vp.znear : vp.zfar;
+      // GX also accepts a range slightly outside [0,1] (e.g. znear -0.06); browsers reject that
+      // pass outright, so clamp after the remap, which keeps the range's direction.
+      const float minDepth = std::clamp(gx::UseReversedZ ? 1.0f - vp.zfar : vp.znear, 0.0f, 1.0f);
+      const float maxDepth = std::clamp(gx::UseReversedZ ? 1.0f - vp.znear : vp.zfar, minDepth, 1.0f);
       pass.SetViewport(vp.left, vp.top, vp.width, vp.height, minDepth, maxDepth);
     } break;
     case CommandType::SetScissor: {
