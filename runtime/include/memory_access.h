@@ -537,6 +537,26 @@ MKW_MEMORY_FORCE_INLINE void WriteResolvedFloat64(uint8_t* r, uint32_t o, uint32
 // FlatWriteRam* remains direct because the translator emits it only for
 // addresses it has proven are ordinary RAM.
 
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+// No flat view to touch (WebAssembly): the proven-RAM stores behind FlatWriteRam* take the
+// checked page-table path like every other access. FlatLoad has no caller once
+// RequiresCheckedAccess() is constant true, but must still compile.
+template <typename T>
+MKW_MEMORY_FORCE_INLINE T FlatLoad(uint32_t address) {
+    if constexpr (sizeof(T) == 1) return Memory::Read8(address);
+    else if constexpr (sizeof(T) == 2) return Memory::Read16(address);
+    else if constexpr (sizeof(T) == 4) return Memory::Read32(address);
+    else return Memory::Read64(address);
+}
+
+template <typename T>
+MKW_MEMORY_FORCE_INLINE void FlatStore(uint32_t address, T value) {
+    if constexpr (sizeof(T) == 1) Memory::Write8(address, value);
+    else if constexpr (sizeof(T) == 2) Memory::Write16(address, value);
+    else if constexpr (sizeof(T) == 4) Memory::Write32(address, value);
+    else Memory::Write64(address, value);
+}
+#else
 template <typename T>
 MKW_MEMORY_FORCE_INLINE T FlatLoad(uint32_t address) {
     T value{};
@@ -549,6 +569,7 @@ MKW_MEMORY_FORCE_INLINE void FlatStore(uint32_t address, T value) {
     const T swapped = MaybeByteSwap(value);
     std::memcpy(MKW_FLAT_GUEST_BASE + address, &swapped, sizeof(T));
 }
+#endif
 
 MKW_MEMORY_FORCE_INLINE uint8_t FlatRead8(uint32_t address) {
     if (GuestFlat::RequiresCheckedAccess()) return Memory::Read8(address);

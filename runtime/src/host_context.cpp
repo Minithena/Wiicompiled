@@ -14,6 +14,12 @@
 
 extern "C" void mkw_co_switch(void** targetSp, void** sourceSp);
 extern "C" void* mkw_co_init(void* stackTop, void (*entry)(void*), void* argument);
+#elif defined(__EMSCRIPTEN__)
+#include <pthread.h>
+#include <semaphore.h>
+
+#include <algorithm>
+#include <cstdlib>
 #elif defined(__linux__)
 #include <libco.h>
 
@@ -155,6 +161,124 @@ void Switch(Handle target)
 
     g_current = destination;
     mkw_co_switch(&destination->savedStackPointer, &source->savedStackPointer);
+    g_current = source;
+}
+
+#elif defined(__EMSCRIPTEN__)
+
+// WebAssembly cannot switch stacks, so each context is a real pthread (a Web Worker) and a
+// switch passes a baton: post the target's semaphore, then block on our own. Exactly one context
+// runs at a time, as with fibers, and the semaphores order every handoff. Any thread_local state
+// that the fibers shared by running on one host thread is per-context here.
+
+namespace {
+struct Context {
+    sem_t resume;
+    pthread_t thread{};
+    Entry entry = nullptr;
+    void* argument = nullptr;
+    bool ownsThread = false;
+    bool destroyed = false;
+};
+
+// Only the baton holder reads or writes this; the semaphores publish it to the next holder.
+Context* g_current = nullptr;
+
+void* ContextThread(void* argument)
+{
+    auto* context = static_cast<Context*>(argument);
+    sem_wait(&context->resume);
+    if (context->destroyed) {
+        return nullptr;
+    }
+    g_current = context;
+    context->entry(context->argument);
+
+    // A guest fiber must return through FiberProc's scheduler handoff.
+    std::abort();
+}
+} // namespace
+
+bool InitializeScheduler(Handle* scheduler)
+{
+    auto* context = new Context();
+    sem_init(&context->resume, 0, 0);
+    g_current = context;
+    *scheduler = context;
+    return true;
+}
+
+void ShutdownScheduler(Handle scheduler)
+{
+    auto* context = static_cast<Context*>(scheduler);
+    if (!context) {
+        return;
+    }
+    if (g_current == context) {
+        g_current = nullptr;
+    }
+    sem_destroy(&context->resume);
+    delete context;
+}
+
+Handle Create(std::size_t stackSize, Entry entry, void* argument)
+{
+    auto* context = new Context();
+    context->entry = entry;
+    context->argument = argument;
+    sem_init(&context->resume, 0, 0);
+
+    pthread_attr_t attributes;
+    pthread_attr_init(&attributes);
+    pthread_attr_setstacksize(&attributes, std::max<std::size_t>(stackSize, 64 * 1024));
+    const int result = pthread_create(&context->thread, &attributes, ContextThread, context);
+    pthread_attr_destroy(&attributes);
+    if (result != 0) {
+        sem_destroy(&context->resume);
+        delete context;
+        return nullptr;
+    }
+    context->ownsThread = true;
+    return context;
+}
+
+void Destroy(Handle context)
+{
+    auto* nativeContext = static_cast<Context*>(context);
+    if (!nativeContext) {
+        return;
+    }
+    // Never the running context (fiber_manager defers those), so its thread is parked on its
+    // semaphore, either before its first run or inside Switch. Wake it to exit, then reap it.
+    if (nativeContext->ownsThread) {
+        nativeContext->destroyed = true;
+        sem_post(&nativeContext->resume);
+        pthread_join(nativeContext->thread, nullptr);
+    }
+    sem_destroy(&nativeContext->resume);
+    delete nativeContext;
+}
+
+bool IsCurrent(Handle context)
+{
+    return context != nullptr && context == g_current;
+}
+
+void Switch(Handle target)
+{
+    auto* destination = static_cast<Context*>(target);
+    Context* source = g_current;
+    if (!destination || destination == source) {
+        return;
+    }
+
+    g_current = destination;
+    sem_post(&destination->resume);
+    while (sem_wait(&source->resume) != 0) {
+    }
+    if (source->destroyed) {
+        pthread_exit(nullptr);
+    }
     g_current = source;
 }
 
