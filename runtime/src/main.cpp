@@ -1387,6 +1387,10 @@ int RuntimeMain(int argc, char** argv) {
         static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
             {"auto", BACKEND_AUTO}, {"metal", BACKEND_METAL},
         }};
+#elif defined(__EMSCRIPTEN__)
+        static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
+            {"auto", BACKEND_AUTO}, {"webgpu", BACKEND_WEBGPU},
+        }};
 // only vulkan for linux
 #elif defined(__linux__)
             static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{

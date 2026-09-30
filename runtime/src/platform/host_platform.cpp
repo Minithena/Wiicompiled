@@ -46,6 +46,9 @@ std::optional<std::filesystem::path> ExecutableDirectory() noexcept {
     std::error_code ec;
     const auto resolved = std::filesystem::weakly_canonical(path, ec);
     return (ec ? std::filesystem::path(path) : resolved).parent_path();
+#elif defined(__EMSCRIPTEN__)
+    // The web build preloads its bundled runtime assets (dsp_coef.bin, wii_bootstrap/) here.
+    return std::filesystem::path("/app");
 #else
     return std::nullopt;
 #endif
@@ -66,6 +69,9 @@ std::filesystem::path ApplicationDataDirectory(std::string_view applicationName)
     if (const passwd* user = getpwuid(getuid()); user && user->pw_dir && *user->pw_dir) {
         return std::filesystem::path(user->pw_dir) / "Library" / "Application Support" / applicationName;
     }
+#elif defined(__EMSCRIPTEN__)
+    // In-memory for now; the page writes Config.toml here before the game starts.
+    return std::filesystem::path("/data") / applicationName;
 #endif
     return std::filesystem::current_path() / applicationName;
 }

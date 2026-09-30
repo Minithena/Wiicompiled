@@ -15,10 +15,9 @@
 extern "C" void mkw_co_switch(void** targetSp, void** sourceSp);
 extern "C" void* mkw_co_init(void* stackTop, void (*entry)(void*), void* argument);
 #elif defined(__EMSCRIPTEN__)
-#include <pthread.h>
-#include <semaphore.h>
+#include <emscripten/emscripten.h>
 
-#include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #elif defined(__linux__)
 #include <libco.h>
@@ -166,43 +165,48 @@ void Switch(Handle target)
 
 #elif defined(__EMSCRIPTEN__)
 
-// WebAssembly cannot switch stacks, so each context is a real pthread (a Web Worker) and a
-// switch passes a baton: post the target's semaphore, then block on our own. Exactly one context
-// runs at a time, as with fibers, and the semaphores order every handoff. Any thread_local state
-// that the fibers shared by running on one host thread is per-context here.
+// WebAssembly cannot switch stacks itself, but JSPI (JavaScript Promise Integration) can suspend
+// a whole wasm call chain. Every context is its own JSPI call (the scheduler is main(), which
+// Emscripten already runs as one), all on the same thread, so thread_local state, the WebGPU
+// device and the canvas are shared exactly as with native fibers. A switch suspends the running
+// call and resumes (or starts) the target from the event loop; the JS side is
+// platform/web/mkw_fibers.js. JSPI does not switch the linear-memory C stack, so each context
+// owns one and the JS side swaps the stack pointer and limits around every switch.
 
 namespace {
 struct Context {
-    sem_t resume;
-    pthread_t thread{};
+    // Read by mkw_fibers.js at fixed offsets: keep these two fields first.
+    uint8_t* stack = nullptr;
+    uint32_t stackSize = 0;
     Entry entry = nullptr;
     void* argument = nullptr;
-    bool ownsThread = false;
-    bool destroyed = false;
 };
 
-// Only the baton holder reads or writes this; the semaphores publish it to the next holder.
 Context* g_current = nullptr;
+} // namespace
 
-void* ContextThread(void* argument)
+extern "C" {
+// Suspends the calling context until something switches back to it, after starting or resuming
+// `to`. Implemented in mkw_fibers.js.
+void mkw_fiber_switch(Context* from, Context* to);
+// Drops a context that will never run again (its suspended call is released for collection).
+void mkw_fiber_forget(Context* context);
+
+// First entry into a context, called from mkw_fibers.js as a JSPI export on the context's stack.
+EMSCRIPTEN_KEEPALIVE void mkw_fiber_entry(Context* context)
 {
-    auto* context = static_cast<Context*>(argument);
-    sem_wait(&context->resume);
-    if (context->destroyed) {
-        return nullptr;
-    }
     g_current = context;
     context->entry(context->argument);
 
     // A guest fiber must return through FiberProc's scheduler handoff.
     std::abort();
 }
-} // namespace
+}
 
 bool InitializeScheduler(Handle* scheduler)
 {
+    // Runs on main()'s own stack; no allocation needed.
     auto* context = new Context();
-    sem_init(&context->resume, 0, 0);
     g_current = context;
     *scheduler = context;
     return true;
@@ -211,34 +215,23 @@ bool InitializeScheduler(Handle* scheduler)
 void ShutdownScheduler(Handle scheduler)
 {
     auto* context = static_cast<Context*>(scheduler);
-    if (!context) {
-        return;
-    }
     if (g_current == context) {
         g_current = nullptr;
     }
-    sem_destroy(&context->resume);
     delete context;
 }
 
 Handle Create(std::size_t stackSize, Entry entry, void* argument)
 {
     auto* context = new Context();
-    context->entry = entry;
-    context->argument = argument;
-    sem_init(&context->resume, 0, 0);
-
-    pthread_attr_t attributes;
-    pthread_attr_init(&attributes);
-    pthread_attr_setstacksize(&attributes, std::max<std::size_t>(stackSize, 64 * 1024));
-    const int result = pthread_create(&context->thread, &attributes, ContextThread, context);
-    pthread_attr_destroy(&attributes);
-    if (result != 0) {
-        sem_destroy(&context->resume);
+    context->stackSize = static_cast<uint32_t>((stackSize + 15) & ~std::size_t{15});
+    context->stack = static_cast<uint8_t*>(std::aligned_alloc(16, context->stackSize));
+    if (!context->stack) {
         delete context;
         return nullptr;
     }
-    context->ownsThread = true;
+    context->entry = entry;
+    context->argument = argument;
     return context;
 }
 
@@ -248,14 +241,9 @@ void Destroy(Handle context)
     if (!nativeContext) {
         return;
     }
-    // Never the running context (fiber_manager defers those), so its thread is parked on its
-    // semaphore, either before its first run or inside Switch. Wake it to exit, then reap it.
-    if (nativeContext->ownsThread) {
-        nativeContext->destroyed = true;
-        sem_post(&nativeContext->resume);
-        pthread_join(nativeContext->thread, nullptr);
-    }
-    sem_destroy(&nativeContext->resume);
+    // Never the running context (fiber_manager defers those).
+    mkw_fiber_forget(nativeContext);
+    std::free(nativeContext->stack);
     delete nativeContext;
 }
 
@@ -273,12 +261,7 @@ void Switch(Handle target)
     }
 
     g_current = destination;
-    sem_post(&destination->resume);
-    while (sem_wait(&source->resume) != 0) {
-    }
-    if (source->destroyed) {
-        pthread_exit(nullptr);
-    }
+    mkw_fiber_switch(source, destination);
     g_current = source;
 }
 

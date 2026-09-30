@@ -22,6 +22,15 @@ else()
     message(FATAL_ERROR
         "WiiCompiled supports 64-bit LLVM-MinGW Clang on Windows, native Linux x86_64/aarch64, or Apple Clang on macOS arm64")
 endif()
+if(MKW_PLATFORM_WEB)
+    # Threads, wasm exception handling and wasm setjmp/longjmp (the SEH emulation in
+    # system_bridge uses longjmp) must be enabled globally, compile and link, so aurora and every
+    # fetched dependency inherit them. Emscripten's libc++ does not pull in malloc/free through
+    # <new> or <string> the way other standard libraries do; some dependencies rely on that.
+    add_compile_options(-pthread -fwasm-exceptions -sSUPPORT_LONGJMP=wasm
+        "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include cstdlib>")
+    add_link_options(-pthread -fwasm-exceptions -sSUPPORT_LONGJMP=wasm)
+endif()
 if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     message(FATAL_ERROR "WiiCompiled only supports Release builds")
 endif()

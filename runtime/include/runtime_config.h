@@ -170,6 +170,8 @@ inline bool IsSupportedGraphicsApi(std::string_view value) {
 #if defined(__APPLE__)
     static constexpr std::array<std::string_view, 2> values{"auto", "metal"};
 // only vulkan for linux
+#elif defined(__EMSCRIPTEN__)
+    static constexpr std::array<std::string_view, 2> values{"auto", "webgpu"};
 #elif defined(__linux__)
     static constexpr std::array<std::string_view, 2> values{"auto", "vulkan"};
 #elif defined(_WIN32)
