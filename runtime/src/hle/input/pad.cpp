@@ -3,7 +3,6 @@
 #include "hle/controller_status_contract.h"
 #include "input_bindings.h"
 #include "wii_remote_input.h"
-#include "platform/web/web_auto_join.h"
 
 #include <algorithm>
 #include <atomic>
@@ -119,9 +118,6 @@ extern "C" uint32_t PAD__Read_HLE(uint32_t statusPtr)
 
     FillTriggersHeldByButtons(statuses);
     InputBindings::Apply(statuses);
-#ifdef __EMSCRIPTEN__
-    WebAutoJoin::Apply(statuses[0]);
-#endif
 
     try {
         for (uint32_t i = 0; i < PAD_CHANMAX; ++i) {

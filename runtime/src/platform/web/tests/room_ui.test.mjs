@@ -83,10 +83,10 @@ class FakeWebSocket {
   close() { this.readyState = 3; this.onclose?.(); }
 }
 
-function setupRoomPage() {
+function setupRoomPage(search = '?room=abcdef') {
   const ids = [
     'room-message', 'room-panel', 'room-name', 'room-connection', 'room-roster', 'room-count',
-    'room-game-status', 'cancel-auto-join', 'lobby-card', 'room-setup', 'room-invite',
+    'room-game-status', 'cancel-room-launch', 'lobby-card', 'room-setup', 'room-invite',
     'invite-link', 'join-room', 'create-room', 'copy-invite', 'leave-room', 'status', 'start',
     'reload', 'overlay', 'controls', 'show-controls', 'hide-controls', 'canvas', 'volume',
     'volume-value', 'toggle-mute', 'keyboard-off', 'binding-help', 'room-code',
@@ -117,18 +117,20 @@ function setupRoomPage() {
   const timers = new Set();
   FakeWebSocket.instances = [];
   const window = { addEventListener() {} };
+  const location = new URL(`https://game.test/${search}`);
   const context = vm.createContext({
     URL,
     URLSearchParams,
     AbortSignal,
     WebSocket: FakeWebSocket,
     document,
-    location: { href: 'https://game.test/?room=abcdef', hostname: 'game.test', search: '?room=abcdef' },
+    location: { href: location.href, hostname: location.hostname, search: location.search },
     window,
     navigator: { gpu: {} },
     self: { crossOriginIsolated: true },
     WebAssembly: { Suspending() {} },
     localStorage,
+    ENV: {},
     console,
     setTimeout: () => { const timer = {}; timers.add(timer); return timer; },
     clearTimeout: (timer) => timers.delete(timer),
@@ -196,8 +198,8 @@ test('Play stays disabled until both lobby welcome and runtime readiness, in eit
   }
 });
 
-test('starting the game is single-shot and returns the room panel to controls', () => {
-  const { context, elements, sockets } = setupRoomPage();
+test('manual Play is single-shot and reveals the game immediately', () => {
+  const { context, elements, sockets } = setupRoomPage('?room=abcdef&manual');
   const start = elements.get('start');
   const socket = sockets[0];
   const controls = elements.get('controls');
@@ -224,6 +226,155 @@ test('starting the game is single-shot and returns the room panel to controls', 
   for (const id of ['create-room', 'join-room', 'room-code']) {
     assert.equal(elements.get(id).disabled, true, `${id} should be disabled after starting`);
   }
+});
+
+test('direct Play keeps the lobby overlay until the runtime reports ready', () => {
+  const { context, elements, sockets } = setupRoomPage();
+  const module = context.Module;
+  const start = elements.get('start');
+  const socket = sockets[0];
+  const controls = elements.get('controls');
+  const roomPanel = elements.get('room-panel');
+  const lobbyCard = elements.get('lobby-card');
+  const overlay = elements.get('overlay');
+  const cancel = elements.get('cancel-room-launch');
+  const calls = [];
+  module.callMain = (args) => calls.push(args);
+
+  socket.open();
+  welcome(socket);
+  module.onRuntimeInitialized();
+  module.preRun[0]();
+  assert.equal(context.ENV.MKW_WEB_DIRECT_JOIN, '1');
+  assert.equal(context.ENV.MKW_WEB_AUTO_JOIN, undefined, 'the old macro flag is removed');
+  assert.equal(context.ENV.MKW_WEB_ROOM.includes('/v1/rooms/abcdef/ws'), true);
+
+  start.dispatch('click');
+  start.dispatch('click');
+
+  assert.equal(calls.length, 1, 'direct Play must start the game once');
+  assert.equal(overlay.hidden, false, 'the overlay remains while the direct room connection initializes');
+  assert.equal(roomPanel.parentNode, lobbyCard, 'the lobby stays visible in the overlay');
+  assert.equal(start.hidden, true);
+  assert.equal(start.disabled, true);
+  assert.equal(cancel.hidden, false);
+  assert.equal(elements.get('status').textContent, 'Starting a direct connection to your room…');
+
+  context.window.mkwSetRoomLaunchStatus('Connecting directly to your room…', 'loading');
+  assert.equal(overlay.hidden, false);
+  assert.equal(cancel.hidden, false);
+  assert.equal(elements.get('status').textContent, 'Connecting directly to your room…');
+
+  context.window.mkwSetRoomLaunchStatus('Character and vehicle selection is ready.', 'ready');
+  assert.equal(overlay.hidden, true);
+  assert.equal(roomPanel.parentNode, controls);
+  assert.equal(cancel.hidden, true);
+  assert.equal(elements.get('canvas').focused, true);
+  assert.equal(elements.get('room-game-status').textContent, 'Character and vehicle selection is ready.');
+  context.window.mkwSetRoomLaunchStatus('Late loading update.', 'loading');
+  assert.equal(overlay.hidden, true, 'late loading updates must not reopen a settled launch');
+});
+
+test('direct launch accepts a runtime manual handoff and Cancel invokes the export once', () => {
+  for (const cancelFromUi of [false, true]) {
+    const { context, elements, sockets } = setupRoomPage();
+    const module = context.Module;
+    const start = elements.get('start');
+    const socket = sockets[0];
+    const controls = elements.get('controls');
+    const roomPanel = elements.get('room-panel');
+    const overlay = elements.get('overlay');
+    const cancel = elements.get('cancel-room-launch');
+    const calls = [];
+    let cancelCalls = 0;
+    module.callMain = (args) => calls.push(args);
+    module._mkw_web_cancel_room_launch = () => { cancelCalls++; };
+
+    socket.open();
+    welcome(socket);
+    module.onRuntimeInitialized();
+    start.dispatch('click');
+    assert.equal(calls.length, 1);
+    assert.equal(overlay.hidden, false);
+
+    if (cancelFromUi) {
+      cancel.dispatch('click');
+      cancel.dispatch('click');
+      assert.equal(cancelCalls, 1, 'the cancel export is called once');
+      assert.match(elements.get('room-game-status').textContent, /manually/);
+    } else {
+      context.window.mkwSetRoomLaunchStatus('Continue through the menus.', 'manual');
+      assert.equal(cancelCalls, 0);
+    }
+
+    assert.equal(overlay.hidden, true);
+    assert.equal(roomPanel.parentNode, controls);
+    assert.equal(cancel.hidden, true);
+    assert.equal(elements.get('canvas').focused, true);
+    context.window.mkwSetRoomLaunchStatus('Late loading update.', 'loading');
+    assert.equal(overlay.hidden, true, 'manual handoff must stay settled');
+  }
+});
+
+test('a failed direct launch keeps its error and Reload visible against late status updates', () => {
+  const { context, elements, sockets } = setupRoomPage();
+  const module = context.Module;
+  const socket = sockets[0];
+  const calls = [];
+  module.callMain = (args) => calls.push(args);
+  socket.open();
+  welcome(socket);
+  module.onRuntimeInitialized();
+  elements.get('start').dispatch('click');
+
+  context.window.mkwSetRoomLaunchStatus('The room connection failed.', 'failed');
+  assert.equal(elements.get('overlay').hidden, false);
+  assert.equal(elements.get('room-panel').parentNode, elements.get('lobby-card'));
+  assert.equal(elements.get('status').textContent, 'The room connection failed.');
+  assert.equal(elements.get('reload').hidden, false);
+  assert.equal(elements.get('start').hidden, true);
+  assert.equal(elements.get('cancel-room-launch').hidden, true);
+
+  context.window.mkwSetRoomLaunchStatus('Late success.', 'ready');
+  module.setStatus('late download status');
+  assert.equal(elements.get('overlay').hidden, false);
+  assert.equal(elements.get('status').textContent, 'The room connection failed.');
+  assert.equal(elements.get('reload').hidden, false);
+  assert.equal(calls.length, 1);
+});
+
+test('manual invite and no-room Start keep the normal immediate reveal', () => {
+  for (const search of ['?room=abcdef&manual', '?']) {
+    const { context, elements, sockets } = setupRoomPage(search);
+    const module = context.Module;
+    const start = elements.get('start');
+    const controls = elements.get('controls');
+    const roomPanel = elements.get('room-panel');
+    const calls = [];
+    module.callMain = (args) => calls.push(args);
+
+    if (sockets[0]) {
+      sockets[0].open();
+      welcome(sockets[0]);
+    }
+    module.onRuntimeInitialized();
+    module.preRun[0]();
+    assert.equal(context.ENV.MKW_WEB_DIRECT_JOIN, undefined);
+    assert.equal(context.ENV.MKW_WEB_AUTO_JOIN, undefined);
+    start.dispatch('click');
+
+    assert.equal(calls.length, 1);
+    assert.equal(elements.get('overlay').hidden, true);
+    assert.equal(roomPanel.parentNode, controls);
+    assert.equal(elements.get('cancel-room-launch').hidden, true);
+  }
+});
+
+test('copied room invites omit the manual opt-out flag', () => {
+  const { elements } = setupRoomPage('?room=abcdef&manual');
+  const invite = new URL(elements.get('invite-link').value);
+  assert.equal(invite.searchParams.get('room'), 'abcdef');
+  assert.equal(invite.searchParams.has('manual'), false);
 });
 
 test('an abort remains fatal when late download and readiness callbacks arrive', () => {
@@ -258,4 +409,7 @@ test('an abort remains fatal when late download and readiness callbacks arrive',
 
   start.dispatch('click');
   assert.equal(calls.length, 0, 'fatal runtime state must never enter the game');
+  context.window.mkwSetRoomLaunchStatus('Late direct ready.', 'ready');
+  assert.equal(status.textContent, fatalMessage, 'a late room callback must not clear a fatal abort');
+  assert.equal(reload.hidden, false);
 });

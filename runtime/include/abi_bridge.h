@@ -4,6 +4,9 @@
 #include "system_bridge.h"
 #include "game_graphics_options.h"
 #include "runtime_log.h"
+#ifdef __EMSCRIPTEN__
+#include "platform/web/web_room_launch.h"
+#endif
 
 #include <array>
 #include <atomic>
@@ -26,10 +29,45 @@ inline void InvokeIndirectCpu(uint32_t target, CpuContext* ctx);
 // (used for the path mask filtering in ScnRenderer::createPath: depth of
 // field is always removed, bloom when the user disabled it)
 inline void ApplyRuntimeCallOptions(uint32_t target, CpuContext* ctx) {
+#ifdef __EMSCRIPTEN__
+    // Follow section creation/update through the engine's ordinary lifecycle.
+    if (target == 0x80634FBCu || target == 0x806224F8u) {
+        WebRoomLaunch::BeforeGuestCall(target, ctx);
+    }
+#endif
     if (target == 0x8023BD38u) {
         // ScnRenderer::createPath receives the post-processing path mask in r4.
         ctx->gpr[4] = RuntimeGameGraphicsOptions::FilterScnRendererPathMask(ctx->gpr[4]);
     }
+}
+
+// Some web launch flows replace one guest call entirely. Keep handled calls
+// separate from pre/post options so the original entry and completion hook are
+// both skipped when the web runtime supplies the result itself.
+MKW_PPC_FORCE_INLINE bool TryHandleRuntimeCall(uint32_t target, CpuContext* ctx) {
+#ifdef __EMSCRIPTEN__
+    if (target == 0x80622DA0u) {
+        return WebRoomLaunch::TryHandleGuestCall(target, ctx);
+    }
+#else
+    (void)target;
+    (void)ctx;
+#endif
+    return false;
+}
+
+// Complete engine lifecycle notifications only after the guest call returns.
+// The native build has no web room-launch state to update; on web, keep the
+// completion hook limited to profile boot.
+MKW_PPC_FORCE_INLINE void CompleteRuntimeCallOptions(uint32_t target, CpuContext* ctx) {
+#ifdef __EMSCRIPTEN__
+    if (target == 0x80634E44u) {
+        WebRoomLaunch::AfterGuestCall(target, ctx);
+    }
+#else
+    (void)target;
+    (void)ctx;
+#endif
 }
 
 // Persistent per-thread CPU context used across translated function calls.
@@ -544,44 +582,55 @@ template <uint32_t Target>
 inline void InvokeDirectCpu(CpuContext* ctx) {
     static_assert(Target != 0, "InvokeDirectCpu cannot target address 0");
     CpuContext* cpu = ctx ? ctx : &GetPersistentCpuContext();
+    if (TryHandleRuntimeCall(Target, cpu)) {
+        return;
+    }
     ApplyRuntimeCallOptions(Target, cpu);
     if constexpr (KnownNativeCpuCall<Target>::kAvailable) {
-        const auto invokeKnownNative = [&]() {
-            PpcNonvolatileGprGuard gprGuard(cpu);
-            if (TryGetCpuContext() != cpu) {
-                CpuContextScope scope(cpu);
+        {
+            const auto invokeKnownNative = [&]() {
+                PpcNonvolatileGprGuard gprGuard(cpu);
+                if (TryGetCpuContext() != cpu) {
+                    CpuContextScope scope(cpu);
+                    KnownNativeCpuCall<Target>::Entry(cpu);
+                    return;
+                }
                 KnownNativeCpuCall<Target>::Entry(cpu);
-                return;
+            };
+            if constexpr (KnownNativeCpuCall<Target>::kNonvolatileFprWriteMask == 0) {
+                invokeKnownNative();
+            } else {
+                PpcNonvolatileFprGuard fprGuard(cpu, KnownNativeCpuCall<Target>::kNonvolatileFprWriteMask);
+                invokeKnownNative();
             }
-            KnownNativeCpuCall<Target>::Entry(cpu);
-        };
-        if constexpr (KnownNativeCpuCall<Target>::kNonvolatileFprWriteMask == 0) {
-            invokeKnownNative();
-        } else {
-            PpcNonvolatileFprGuard fprGuard(cpu, KnownNativeCpuCall<Target>::kNonvolatileFprWriteMask);
-            invokeKnownNative();
         }
+        CompleteRuntimeCallOptions(Target, cpu);
         return;
     }
 
     if constexpr (KnownTypedNativeCpuCall<Target>::kAvailable) {
-        PpcNonvolatileGprGuard gprGuard(cpu);
-        if (TryGetCpuContext() != cpu) {
-            CpuContextScope scope(cpu);
-            KnownTypedNativeCpuCall<Target>::Invoke(cpu);
-        } else {
-            KnownTypedNativeCpuCall<Target>::Invoke(cpu);
+        {
+            PpcNonvolatileGprGuard gprGuard(cpu);
+            if (TryGetCpuContext() != cpu) {
+                CpuContextScope scope(cpu);
+                KnownTypedNativeCpuCall<Target>::Invoke(cpu);
+            } else {
+                KnownTypedNativeCpuCall<Target>::Invoke(cpu);
+            }
         }
+        CompleteRuntimeCallOptions(Target, cpu);
         return;
     }
 
     if constexpr (KnownTranslatedCpuCall<Target>::kAvailable) {
         DispatchKnownTranslatedCpuTargetStatic<Target>(cpu);
+        CompleteRuntimeCallOptions(Target, cpu);
         return;
     }
 
     const auto* registeredInfo = ResolveDirectCpuTargetInfoCached<Target>();
     if (TryDispatchResolvedCpuTarget(registeredInfo, cpu)) {
+        CompleteRuntimeCallOptions(Target, cpu);
         return;
     }
 
@@ -641,11 +690,16 @@ inline void InvokeIndirectCpu(uint32_t target, CpuContext* ctx) {
     if (target == 0) {
         ReportMissingCpuTarget(target, cpu);
     }
+    if (TryHandleRuntimeCall(target, cpu)) {
+        return;
+    }
     ApplyRuntimeCallOptions(target, cpu);
     if (TryDispatchRawCpuTarget(TranslatedFunctionRegistry::FindRawByAddressPtr(target), cpu)) {
+        CompleteRuntimeCallOptions(target, cpu);
         return;
     }
     if (TryDispatchResolvedCpuTarget(TranslatedFunctionRegistry::FindByAddressPtr(target), cpu)) {
+        CompleteRuntimeCallOptions(target, cpu);
         return;
     }
     ReportMissingCpuTarget(target, cpu);

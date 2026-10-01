@@ -351,6 +351,11 @@ target_include_directories(mkw_sc_serial_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR
 target_compile_features(mkw_sc_serial_tests PRIVATE cxx_std_17)
 add_test(NAME mkw_sc_serial_tests COMMAND mkw_sc_serial_tests)
 
+add_executable(mkw_guest_service_call_tests "${CMAKE_CURRENT_LIST_DIR}/tests/guest_service_call_tests.cpp")
+target_include_directories(mkw_guest_service_call_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
+target_compile_features(mkw_guest_service_call_tests PRIVATE cxx_std_17)
+add_test(NAME mkw_guest_service_call_tests COMMAND mkw_guest_service_call_tests)
+
 # The input expression engine is self-contained, so it can be exercised without
 # linking the runtime or SDL.
 add_executable(mkw_input_expr_tests

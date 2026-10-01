@@ -121,7 +121,7 @@
         <ul id="room-roster" aria-label="Connected players" aria-live="polite"></ul>
         <p id="room-connection" class="note" role="status">Start the game to connect.</p>
         <p id="room-game-status" class="note" role="status"></p>
-        <button id="cancel-auto-join" class="link" hidden>Use menus manually</button>
+        <button id="cancel-room-launch" class="link" hidden>Continue manually</button>
       </div>
       <p id="room-message" class="note" role="status">Choose a room before starting the game.</p>
       <p class="note"><a href="https://github.com/Minithena/mariokartwebtest/tree/claude/vigilant-ride-auy5y2/tools/cloudflare/rooms" target="_blank" rel="noopener noreferrer">Room server source</a></p>
@@ -182,10 +182,14 @@
   const roomMessage = document.getElementById('room-message');
   const roomPanel = document.getElementById('room-panel');
   const roomName = document.getElementById('room-name');
-  let runtimeReady = false, runtimeFailed = false, lobbyReady = !roomUrl, gameStarted = false, lobbySocket, selfRoomId = 0;
+  const directRoomJoin = !!roomUrl && !params.has('manual');
+  let runtimeReady = false, runtimeFailed = false, roomLaunchFailed = false;
+  let lobbyReady = !roomUrl, gameStarted = false, roomLaunchState = 'idle';
+  let cancelRoomLaunchRequested = false, lobbySocket, selfRoomId = 0;
   const updateStartButton = () => {
     const button = document.getElementById('start');
-    button.disabled = runtimeFailed || !runtimeReady || !lobbyReady;
+    button.disabled = runtimeFailed || roomLaunchFailed || !runtimeReady || !lobbyReady || gameStarted;
+    button.hidden = runtimeFailed || roomLaunchFailed || gameStarted;
     button.textContent = !runtimeReady ? 'Loading…' : !lobbyReady ? 'Connecting…' : roomUrl ? 'Play online' : 'Start';
   };
   try { roomName.value = localStorage.getItem('mkw-room-name') || ''; } catch {}
@@ -212,13 +216,61 @@
     document.getElementById('room-game-status').textContent = state === 'connecting' ? 'Starting game…'
       : state === 'connected' ? '' : 'The game disconnected. Reload to reconnect.';
   };
-  window.mkwSetAutoJoinStatus = (text, active) => {
-    document.getElementById('room-game-status').textContent = text;
-    document.getElementById('cancel-auto-join').hidden = !active;
-  };
-  document.getElementById('cancel-auto-join').addEventListener('click', () => {
-    if (typeof Module?._mkw_web_cancel_auto_join === 'function') Module._mkw_web_cancel_auto_join();
+  const statusEl = document.getElementById('status');
+  const startButton = document.getElementById('start');
+  const overlay = document.getElementById('overlay');
+  const controlsPanel = document.getElementById('controls');
+  const cancelRoomLaunchButton = document.getElementById('cancel-room-launch');
+  const showRoomPanelInControls = () => controlsPanel.prepend(roomPanel);
+  const finishRoomLaunchOverlay = () => {
+    cancelRoomLaunchButton.hidden = true;
+    cancelRoomLaunchButton.disabled = true;
+    showRoomPanelInControls();
+    overlay.hidden = true;
+    statusEl.textContent = '';
     Module.canvas.focus();
+  };
+  const invokePendingRoomLaunchCancel = () => {
+    if (!cancelRoomLaunchRequested || !runtimeReady || typeof Module?._mkw_web_cancel_room_launch !== 'function') return;
+    Module._mkw_web_cancel_room_launch();
+    cancelRoomLaunchRequested = false;
+  };
+  window.mkwSetRoomLaunchStatus = (text, state) => {
+    if (runtimeFailed || roomLaunchFailed || !directRoomJoin || !gameStarted ||
+        roomLaunchState === 'ready' || roomLaunchState === 'manual' || roomLaunchState === 'failed') return;
+    if (!['loading', 'ready', 'manual', 'failed'].includes(state)) return;
+    roomLaunchState = state;
+    const message = String(text || '');
+    document.getElementById('room-game-status').textContent = message;
+    if (state === 'ready' || state === 'manual') {
+      finishRoomLaunchOverlay();
+      return;
+    }
+    if (state === 'failed') {
+      roomLaunchFailed = true;
+      startButton.hidden = true;
+      startButton.disabled = true;
+      cancelRoomLaunchButton.hidden = true;
+      cancelRoomLaunchButton.disabled = true;
+      overlay.hidden = false;
+      statusEl.textContent = message;
+      document.getElementById('reload').hidden = false;
+      return;
+    }
+    overlay.hidden = false;
+    statusEl.textContent = message;
+    startButton.hidden = true;
+    startButton.disabled = true;
+    cancelRoomLaunchButton.hidden = false;
+    cancelRoomLaunchButton.disabled = false;
+  };
+  cancelRoomLaunchButton.addEventListener('click', () => {
+    if (runtimeFailed || roomLaunchFailed || !directRoomJoin || !gameStarted || roomLaunchState !== 'loading') return;
+    roomLaunchState = 'manual';
+    cancelRoomLaunchRequested = true;
+    document.getElementById('room-game-status').textContent = 'Continuing through the game menus manually.';
+    finishRoomLaunchOverlay();
+    invokePendingRoomLaunchCancel();
   });
   window.mkwSetRoomPlayers = (json, selfId) => {
     let roster;
@@ -259,7 +311,7 @@
     const invite = new URL(location.href);
     for (const name of ['log', 'netlog', 'muted', 'resetsave', 'manual']) invite.searchParams.delete(name);
     document.getElementById('invite-link').value = invite.href;
-    roomMessage.textContent = 'Share this link to meet here. Play online connects your game profile and race data to this room, then lets you choose a character and vehicle. Only invite holders can match; this relay does not contact Nintendo. Up to 12 players.';
+    roomMessage.textContent = 'Share this link to meet here. Play online connects your game profile and race data directly to this room, then opens character and vehicle selection. Only invite holders can match; this relay does not contact Nintendo. Up to 12 players.';
     window.mkwSetRoomConnection('connecting');
     const lobbyUrl = new URL(roomUrl);
     lobbyUrl.pathname = lobbyUrl.pathname.replace(/\/ws$/, '/lobby');
@@ -349,8 +401,6 @@
     }, 500);
     console.log('log forwarding on: ' + navigator.userAgent);
   }
-  const statusEl = document.getElementById('status');
-  const startButton = document.getElementById('start');
   const missing = [];
   if (!self.crossOriginIsolated) missing.push('cross-origin isolation (serve with tools/serve.py)');
   if (!('gpu' in navigator)) missing.push('WebGPU');
@@ -362,24 +412,29 @@
       if (params.has('muted')) ENV.MKW_WEB_MUTED = '1';
       if (params.has('resetsave')) ENV.MKW_WEB_RESET_SAVE = '1';
       if (roomUrl) ENV.MKW_WEB_ROOM = roomUrl;
-      if (roomUrl && !params.has('manual')) ENV.MKW_WEB_AUTO_JOIN = '1';
+      if (directRoomJoin) ENV.MKW_WEB_DIRECT_JOIN = '1';
       if (params.has('netlog')) ENV.MKW_WEB_NETLOG = '1';
       if (params.has('log')) ENV.MKW_WEB_PERF = '1';
     }],
     print: (text) => console.log(text),
     printErr: (text) => console.error(text),
-    setStatus: (text) => { if (!runtimeFailed) statusEl.textContent = text; },
+    setStatus: (text) => { if (!runtimeFailed && !roomLaunchFailed) statusEl.textContent = text; },
     onRuntimeInitialized: () => {
-      if (runtimeFailed) return;
+      if (runtimeFailed || roomLaunchFailed) return;
       statusEl.textContent = '';
       runtimeReady = true;
+      invokePendingRoomLaunchCancel();
       updateStartButton();
     },
     onAbort: (what) => {
       runtimeFailed = true;
       runtimeReady = false;
-      document.getElementById('overlay').hidden = false;
+      cancelRoomLaunchRequested = false;
+      cancelRoomLaunchButton.hidden = true;
+      cancelRoomLaunchButton.disabled = true;
+      overlay.hidden = false;
       startButton.hidden = true;
+      startButton.disabled = true;
       document.getElementById('reload').hidden = false;
       statusEl.textContent = 'The game stopped: ' + what + ' (details in the browser console).';
     },
@@ -397,7 +452,6 @@
   }
 
   // The controls panel can be hidden; the choice is remembered in this browser.
-  const controlsPanel = document.getElementById('controls');
   const showControls = document.getElementById('show-controls');
   const setControlsVisible = (visible) => {
     controlsPanel.hidden = !visible;
@@ -480,10 +534,22 @@
   startButton.addEventListener('click', () => {
     if (runtimeFailed || !runtimeReady || !lobbyReady || gameStarted) return;
     gameStarted = true;
+    startButton.disabled = true;
     saveRoomName();
-    controlsPanel.prepend(roomPanel);
     for (const id of ['create-room', 'join-room', 'room-code']) document.getElementById(id).disabled = true;
-    document.getElementById('overlay').hidden = true;
+    if (directRoomJoin) {
+      roomLaunchState = 'loading';
+      startButton.hidden = true;
+      document.getElementById('room-game-status').textContent = 'Starting a direct connection to your room…';
+      statusEl.textContent = 'Starting a direct connection to your room…';
+      cancelRoomLaunchButton.hidden = false;
+      cancelRoomLaunchButton.disabled = false;
+    } else {
+      cancelRoomLaunchButton.hidden = true;
+      showRoomPanelInControls();
+      overlay.hidden = true;
+      statusEl.textContent = '';
+    }
     Module.canvas.focus();
     Module.callMain([]);
   });
