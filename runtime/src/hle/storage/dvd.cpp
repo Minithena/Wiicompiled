@@ -2,6 +2,7 @@
 #include "isa/big_endian.h"
 #include "hle/dvd_contract.h"
 #include "platform/web/web_performance.h"
+#include "platform/web/web_race_warm.h"
 #include "hle/runtime_parse_helpers.h"
 #include "memory.h"
 
@@ -907,6 +908,7 @@ extern "C" int32_t DVDReadPrio_8015E834(uint32_t fileInfoPtr, uint32_t bufferPtr
     DvdReadContract::HostReadFailure failure;
 #ifdef __EMSCRIPTEN__
     const double readStarted = WebPerformance::Enabled() ? WebPerformance::Now() : 0.0;
+    WebRaceWarm::OnDiscRead(HostPathText(entry.hostPath));
 #endif
     if (!DvdReadContract::ReadExact(entry.hostPath, uOffset, uLength, tempBuf, failure)) {
         return DvdReadFatal(fileInfoPtr, HostPathText(entry.hostPath), offset, uLength,

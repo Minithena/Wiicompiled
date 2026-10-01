@@ -242,6 +242,36 @@ addToLibrary({
     const relatedStarted = new Set();
     let lowerKeys = null;
     let knownSizes = null;
+    let prefetchChannel = null;
+
+    // The game thread posts the disc paths a race is about to read (web_race_warm.cpp): one kart
+    // archive per player, which the game otherwise reads one after another, a round trip each.
+    // Only names that exist on the disc are fetched, whole, all at once.
+    function listenForPrefetch(sizes, chunkSize) {
+      if (prefetchChannel || typeof BroadcastChannel === 'undefined') return;
+      prefetchChannel = new BroadcastChannel('mkw-prefetch');
+      prefetchChannel.onmessage = (event) => {
+        const paths = event.data && event.data.paths;
+        if (!Array.isArray(paths)) return;
+        if (!lowerKeys) {
+          lowerKeys = new Map();
+          for (const known of sizes.keys()) lowerKeys.set(known.toLowerCase(), known);
+        }
+        let started = 0;
+        for (const path of paths.slice(0, 96)) {
+          if (typeof path !== 'string' || !/^DATA\/files\/Race\/Kart\/[A-Za-z0-9_.-]+\.szs$/.test(path)) continue;
+          const target = lowerKeys.get(('/game/' + path).toLowerCase());
+          const size = target && sizes.get(target);
+          if (!size || packedFiles.has(target) || relatedStarted.has(target)) continue;
+          relatedStarted.add(target);
+          const url = new URL(aliases.get(target) || target.slice(1), self.location.href);
+          const info = resource(target, url, size, chunkSize, true);
+          ensure(info, 0, Math.ceil(size / chunkSize) - 1).catch(() => { /* a demand read retries */ });
+          started++;
+        }
+        console.error('[web-fetch] race prefetch: ' + started + ' of ' + paths.length + ' kart archives on the disc');
+      };
+    }
 
     // A race reads a few files long after it starts, and every miss is a blocking round trip
     // (0.4-0.5 s from far away): the course's final-lap music (the "_f" stream replaces the "_n"
@@ -316,6 +346,7 @@ addToLibrary({
         }
       }
       warmMenus(sizes, chunkSize);
+      listenForPrefetch(sizes, chunkSize);
       knownSizes = sizes;
       return info;
     }

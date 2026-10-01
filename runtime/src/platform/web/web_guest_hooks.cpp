@@ -51,6 +51,35 @@ bool s_previousSkipped = false;
 bool s_previousRace = false;
 bool s_thisRace = false;
 
+// What an iteration costs when it draws and when it does not (ms of work, sleeping excluded), as
+// moving averages, and from that how often a frame has to be drawn. Mild lag (a fifth of the draws
+// or fewer have to go) skips on demand, which costs the occasional frame showing two steps of
+// motion. More than that draws on a fixed rhythm instead (every 2nd, 3rd... step): every frame
+// then shows the same amount of motion at the same interval, which looks steady where skipping
+// on demand looks shaky.
+double s_drawBusy = 0.0, s_skipBusy = 0.0;
+int32_t s_divider = 1, s_pendingDivider = 1;
+constexpr int32_t kEvaluateEvery = 45;
+constexpr double kOnDemandLimit = 0.20;   // above this skipped fraction, use a fixed rhythm
+constexpr int32_t kMaxDivider = 6;
+
+void UpdateDivider(double period) {
+    int32_t wanted = 1;
+    if (s_drawBusy > period * 1.03) {
+        const double skipBusy = s_skipBusy > 0.5 ? s_skipBusy : 3.0;
+        const double needed = (s_drawBusy - period) / (s_drawBusy - skipBusy);  // fraction to skip
+        if (needed > kOnDemandLimit) {
+            const double clamped = needed < 0.9 ? needed : 0.9;
+            wanted = static_cast<int32_t>(1.0 / (1.0 - clamped) + 0.999);
+            if (wanted < 2) wanted = 2;
+            if (wanted > kMaxDivider) wanted = kMaxDivider;
+        }
+    }
+    // Two evaluations in a row, so one slow stretch does not flip the rhythm.
+    if (wanted == s_pendingDivider) s_divider = wanted;
+    s_pendingDivider = wanted;
+}
+
 bool DecideSkip() {
     const double now = WebPerformance::Now();
     const double period = WebPacing::RetraceIntervalMs();
@@ -60,6 +89,8 @@ bool DecideSkip() {
         s_steps = 0;
         s_streak = 0;
         s_idleSleepMs = 0.0;
+        s_drawBusy = s_skipBusy = 0.0;
+        s_divider = s_pendingDivider = 1;
         return false;
     }
     s_raceCalc = false;
@@ -67,39 +98,56 @@ bool DecideSkip() {
     ++s_steps;
     ++s_raceSteps;
     const bool ahead = s_idleSleepMs >= 3.0;
+    const double dt = now - s_lastDecision;
     if (s_trace) {
         static int printed = 0;
         if (printed < 240 && (printed++ % 1) == 0) {
-            std::printf("[web-pace-trace] step=%d dt=%.1f idle=%.1f lag=%.2f%s\n", s_steps, now - s_lastDecision,
-                        s_idleSleepMs, (now - s_baseTime) / period - s_steps, ahead ? " AHEAD" : "");
+            std::printf("[web-pace-trace] step=%d dt=%.1f idle=%.1f lag=%.2f%s div=%d\n", s_steps, dt, s_idleSleepMs,
+                        (now - s_baseTime) / period - s_steps, ahead ? " AHEAD" : "", s_divider);
         }
+    }
+    // The iteration that just ended was a skipped one or a drawn one; its work was dt minus sleeping.
+    if (s_previousRace && s_lastDecision != 0.0 && dt < 200.0) {
+        const double busy = dt - s_idleSleepMs;
+        double& average = s_previousSkipped ? s_skipBusy : s_drawBusy;
+        average = average == 0.0 ? busy : average * 0.85 + busy * 0.15;
     }
     s_lastDecision = now;
     s_idleSleepMs = 0.0;
+    if (s_steps % kEvaluateEvery == 0) UpdateDivider(period);
+
+    int32_t lag;
     if (ahead) {
         // The game had time to sleep this iteration, so it has headroom and owes nothing (this
         // also absorbs any drift between our clock and the VI's). Real lag never sleeps: the
         // retraces it waits for are already due.
         s_baseTime = now - s_steps * period;
-        s_streak = 0;
-        return false;
+        lag = 0;
+    } else {
+        lag = static_cast<int32_t>((now - s_baseTime) / period) - s_steps;
+        if (lag > s_maxLag.load(std::memory_order_relaxed)) s_maxLag.store(lag, std::memory_order_relaxed);
+        if (lag > kForgiveLag) {
+            s_baseTime = now - s_steps * period;
+            s_streak = 0;
+            ++s_forgiven;
+            return false;
+        }
     }
-    const int32_t lag = static_cast<int32_t>((now - s_baseTime) / period) - s_steps;
-    if (lag > s_maxLag.load(std::memory_order_relaxed)) s_maxLag.store(lag, std::memory_order_relaxed);
-    if (lag > kForgiveLag) {
-        s_baseTime = now - s_steps * period;
+
+    bool skip;
+    if (s_divider >= 2) {
+        skip = (s_steps % s_divider) != 0;
         s_streak = 0;
-        ++s_forgiven;
-        return false;
+    } else {
+        skip = !ahead && lag >= 1 && s_streak < kMaxSkipStreak;
+        s_streak = skip ? s_streak + 1 : 0;
     }
-    if (lag >= 1 && s_streak < kMaxSkipStreak) {
-        ++s_streak;
+    if (skip) {
         ++s_skipCount;
-        WebPacing::BorrowRetrace();
-        return true;
+        // Only a real debt is repaid by running on; otherwise the skipped step waits its turn.
+        if (lag >= 1) WebPacing::BorrowRetrace();
     }
-    s_streak = 0;
-    return false;
+    return skip;
 }
 
 } // namespace
@@ -185,9 +233,10 @@ void Report(double elapsedMs) {
                       simN ? simUs / 1000.0 / simN : 0.0, simN, drawnN ? drawnUs / 1000.0 / drawnN : 0.0, drawnN,
                       drawnN ? drawGuestUs / 1000.0 / drawnN : 0.0);
     }
-    std::printf("[web-pace] race steps/s=%.1f drawn/s=%.1f skipped/s=%.1f forgiven=%u max_lag=%d%s\n",
+    std::printf("[web-pace] race steps/s=%.1f drawn/s=%.1f skipped/s=%.1f forgiven=%u max_lag=%d draw_every=%d "
+                "work_ms(draw/skip)=%.1f/%.1f%s\n",
                 steps * 1000.0 / elapsedMs, drawn * 1000.0 / elapsedMs, skipped * 1000.0 / elapsedMs, forgiven,
-                maxLag, cost);
+                maxLag, s_divider, s_drawBusy, s_skipBusy, cost);
 }
 
 } // namespace WebGuestHooks
