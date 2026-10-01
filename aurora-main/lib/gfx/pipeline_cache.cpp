@@ -1332,9 +1332,10 @@ void initialize_pipeline_cache() {
   }
 
 #ifdef __EMSCRIPTEN__
-  // The writable SQLite pipeline cache (and its writer thread) is off on the web: the browser
-  // recompiles pipelines each session, prewarmed from the bundled seed. With no DB open, every cache
-  // write is a no-op.
+  // The writable SQLite recipe cache is off on the web. Rebuild pipeline objects from the bundled
+  // seed and this browser's recipe log; log recipes for later visits when a runtime pipeline is
+  // missing. WebGPU does not expose persistent pipeline objects, while reuse of compiled artifacts
+  // is managed internally by the browser and GPU driver.
   load_seed_pipelines();
   load_web_pipeline_log();
   begin_pipeline_prewarm();

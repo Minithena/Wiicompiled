@@ -67,12 +67,64 @@ addToLibrary({
 
     // file pointer -> { url, size, chunkSize, chunks: Map<index, Uint8Array> }
     const files = new Map();
+    const fileStates = new Map(); // file pointer -> {generation, waiters, controllers}
     // Resource records also hold bounded background warmups before WASMFS opens their files.
     const resources = new Map();
     let warmingStarted = false;
     // "<path>:<index>" -> { info, index, length }, in least-recently-used-first order
     const lru = new Map();
     let cachedBytes = 0;
+
+    function fileState(file) {
+      let state = fileStates.get(file);
+      if (!state) {
+        state = {generation: 0, waiters: new Set(), controllers: new Set()};
+        fileStates.set(file, state);
+      }
+      return state;
+    }
+
+    function advanceFileGeneration(file) {
+      const state = fileState(file);
+      state.generation++;
+      const closed = new Error('File closed during operation');
+      for (const reject of state.waiters) reject(closed);
+      state.waiters.clear();
+      for (const controller of state.controllers) controller.abort();
+      return state.generation;
+    }
+
+    function waitForFile(file, generation, promise) {
+      const state = fileState(file);
+      if (state.generation !== generation) {
+        promise.catch(() => {});
+        return Promise.reject(new Error('File closed during operation'));
+      }
+      let rejectClosed;
+      const closed = new Promise((_, reject) => {
+        rejectClosed = reject;
+        state.waiters.add(rejectClosed);
+      });
+      return Promise.race([promise, closed]).finally(() => state.waiters.delete(rejectClosed));
+    }
+
+    function waitForResource(info, promise) {
+      if (!info.active) return Promise.reject(new Error('File closed during download'));
+      let rejectClosed;
+      const closed = new Promise((_, reject) => {
+        rejectClosed = reject;
+        info.waiters.add(rejectClosed);
+      });
+      return Promise.race([promise, closed]).finally(() => info.waiters.delete(rejectClosed));
+    }
+
+    function deactivate(info) {
+      info.active = false;
+      const closed = new Error('File closed during download');
+      for (const reject of info.waiters) reject(closed);
+      info.waiters.clear();
+      for (const cancel of info.cancellations) cancel(closed);
+    }
 
     function touch(info, index, length) {
       const key = info.key + ':' + index;
@@ -93,7 +145,8 @@ addToLibrary({
         const packed = packedFiles.get(key);
         if (packed && packed.size !== size) throw new Error('Small-file pack size mismatch');
         info = {key, url, size, packed, chunkSize, chunks: new Map(), inflight: new Map(),
-                prefetch: null, active: true, references: 0, keepWarm};
+                prefetch: null, active: true, references: 0, keepWarm,
+                waiters: new Set(), cancellations: new Set()};
         resources.set(key, info);
       }
       if (keepWarm) info.keepWarm = true;
@@ -120,8 +173,10 @@ addToLibrary({
       // These menus are reached directly after choosing a licence. Warm their data while
       // startup prepares graphics, using two background requests and at most 64 MiB total.
       for (const path of ['Scene/UI/Title.szs', 'Scene/UI/Title_E.szs', 'Scene/UI/MenuSingle.szs',
+                          'Scene/UI/Font.szs', 'Scene/Model/BackModel.szs',
                           'Scene/Model/Driver.szs', 'Scene/Model/Kart/pc-allkart.szs',
                           'Scene/UI/MenuMulti.szs', 'Scene/UI/MenuOther.szs']) queue('DATA/files/' + path);
+      queue('DATA/files/sound/strm/o_Start2_32_fan.brstm');
       const firstVideos = ['DATA/files/thp/title/top_menu.thp', 'DATA/files/thp/button/single_top.thp'];
       for (const path of firstVideos) {
         if (aliases.has('/game/' + path)) queue(path, 0, 2 * 1024 * 1024);
@@ -146,25 +201,36 @@ addToLibrary({
       void run();
     }
 
-    async function describe(file) {
+    async function describe(file, generation) {
+      if (fileState(file).generation !== generation) throw new Error('File closed during operation');
       let info = files.get(file);
       if (info) return info;
       const url = new URL(UTF8ToString(__wasmfs_fetch_get_file_url(file)), self.location.href);
       url.pathname = url.pathname.replace(/\/+/g, '/');
       const key = url.pathname;
       const sizes = await sizesReady;
+      if (fileState(file).generation !== generation) throw new Error('File closed during operation');
       if (!sizes) throw new Error('Game manifest could not be loaded');
       let size = sizes.get(key);
       if (aliases.has(key)) url.href = aliases.get(key);
       if (size === undefined) {
         // Optional files absent from the manifest still need a metadata lookup.
-        const head = await fetch(url, {method: 'HEAD'});
+        const controller = new AbortController();
+        fileState(file).controllers.add(controller);
+        let head;
+        try {
+          head = await fetch(url, {method: 'HEAD', signal: controller.signal});
+        } finally {
+          fileState(file).controllers.delete(controller);
+        }
+        if (fileState(file).generation !== generation) throw new Error('File closed during operation');
         if (!head.ok) throw head;
         const length = head.headers.get('Content-Length');
         size = length === null ? NaN : Number(length);
         if (!Number.isSafeInteger(size) || size < 0) throw new Error('Missing file length: ' + key);
       }
       // Another asynchronous lookup can have completed while this one awaited metadata.
+      if (fileState(file).generation !== generation) throw new Error('File closed during operation');
       info = files.get(file);
       if (info) return info;
       const chunkSize = __wasmfs_fetch_get_chunk_size(file);
@@ -224,7 +290,7 @@ addToLibrary({
       }
       if (missingFirst < 0) return;
       if (info.packed) {
-        const pack = await getPack(info.packed);
+        const pack = await waitForResource(info, getPack(info.packed));
         if (!info.active) return;
         if (info.packed.offset + info.size > pack.byteLength) throw new Error('Truncated small-file pack');
         for (let i = missingFirst; i <= missingLast; i++) {
@@ -242,28 +308,81 @@ addToLibrary({
         missingFirst = 0;
         missingLast = Math.ceil(info.size / info.chunkSize) - 1;
       }
-      const download = (async () => {
-        const start = missingFirst * info.chunkSize;
-        const end = Math.min((missingLast + 1) * info.chunkSize, info.size) - 1;
-        const response = await fetch(info.url, {headers: {'Range': `bytes=${start}-${end}`}});
-        if (!response.ok) throw response;
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        if (!info.active) return; // a closed file must not repopulate the cache
-        const wholeFile = response.status === 200 && bytes.byteLength === info.size;
-        if (!wholeFile && (response.status !== 206 || bytes.byteLength !== end - start + 1)) throw {status: 0};
-        for (let i = missingFirst; i <= missingLast; i++) {
-          const base = wholeFile ? 0 : start;
-          const chunk = bytes.slice(i * info.chunkSize - base, (i + 1) * info.chunkSize - base);
-          info.chunks.set(i, chunk);
-          touch(info, i, chunk.byteLength);
-        }
-      })();
-      for (let i = missingFirst; i <= missingLast; i++) info.inflight.set(i, download);
+      // A demand read only needs its own chunks, even when they are part of a larger
+      // background request. Release each complete chunk as the response body arrives.
+      const pending = new Map();
+      for (let i = missingFirst; i <= missingLast; i++) {
+        let resolve, reject;
+        const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+        promise.catch(() => {}); // a prefetched chunk may never have a waiting reader
+        pending.set(i, {promise, resolve, reject});
+        info.inflight.set(i, promise);
+      }
+      const controller = new AbortController();
+      const cancel = (failed = new Error('File closed during download')) => {
+        for (const item of pending.values()) item.reject(failed);
+        controller.abort();
+      };
+      info.cancellations.add(cancel);
+      function publish(index, chunk) {
+        if (!info.active) throw new Error('File closed during download');
+        info.chunks.set(index, chunk);
+        touch(info, index, chunk.byteLength);
+        pending.get(index).resolve();
+      }
+      const start = missingFirst * info.chunkSize;
+      const end = Math.min((missingLast + 1) * info.chunkSize, info.size) - 1;
+      let reader;
       try {
-        await download;
+        const response = await fetch(info.url, {
+          headers: {'Range': `bytes=${start}-${end}`}, signal: controller.signal,
+        });
+        if (!response.ok) throw response;
+        if (response.status === 200) {
+          // Preserve compatibility with a server that ignores Range and returns the whole file.
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          if (bytes.byteLength !== info.size) throw new Error('Invalid whole-file response');
+          for (let i = missingFirst; i <= missingLast; i++) {
+            publish(i, bytes.slice(i * info.chunkSize, (i + 1) * info.chunkSize));
+          }
+          return;
+        }
+        if (response.status !== 206 || !response.body) throw new Error('Invalid range response');
+        const contentRange = response.headers.get('Content-Range');
+        if (contentRange && contentRange !== `bytes ${start}-${end}/${info.size}`) {
+          throw new Error('Unexpected response byte range');
+        }
+        reader = response.body.getReader();
+        let received = 0, index = missingFirst, filled = 0, chunk;
+        for (;;) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          received += value.byteLength;
+          if (received > end - start + 1) throw new Error('Oversized range response');
+          let offset = 0;
+          while (offset < value.byteLength) {
+            if (!chunk) chunk = new Uint8Array(Math.min(info.chunkSize, info.size - index * info.chunkSize));
+            const take = Math.min(chunk.byteLength - filled, value.byteLength - offset);
+            chunk.set(value.subarray(offset, offset + take), filled);
+            filled += take;
+            offset += take;
+            if (filled === chunk.byteLength) {
+              publish(index++, chunk);
+              chunk = null;
+              filled = 0;
+            }
+          }
+        }
+        if (received !== end - start + 1) throw new Error('Truncated range response');
+      } catch (failed) {
+        for (const item of pending.values()) item.reject(failed);
+        if (reader) await reader.cancel().catch(() => {});
+        throw failed;
       } finally {
-        for (let i = missingFirst; i <= missingLast; i++) {
-          if (info.inflight.get(i) === download) info.inflight.delete(i);
+        if (reader) reader.releaseLock();
+        info.cancellations.delete(cancel);
+        for (const [index, item] of pending) {
+          if (info.inflight.get(index) === item.promise) info.inflight.delete(index);
         }
       }
     }
@@ -283,13 +402,14 @@ addToLibrary({
       });
     }
     wasmFS$backends[backend] = {
-      allocFile: async (file) => {},
+      allocFile: async (file) => { advanceFileGeneration(file); },
       freeFile: async (file) => {
+        advanceFileGeneration(file);
         const info = files.get(file);
         if (!info) return;
         files.delete(file);
         if (--info.references > 0 || info.keepWarm) return;
-        info.active = false;
+        deactivate(info);
         resources.delete(info.key);
         for (const [index, chunk] of info.chunks) {
           lru.delete(info.key + ':' + index);
@@ -300,15 +420,21 @@ addToLibrary({
       write: async (file, buffer, length, offset) => -{{{ cDefs.EROFS }}},
       read: async (file, buffer, length, offset) => {
         if (offset < 0 || length <= 0) return 0;
+        const generation = fileState(file).generation;
         let info;
         try {
-          info = await describe(file);
+          info = await waitForFile(file, generation, describe(file, generation));
+          if (fileState(file).generation !== generation || files.get(file) !== info) {
+            throw new Error('File closed during read');
+          }
           length = Math.min(length, info.size - offset);
           if (length <= 0) return 0;
           const first = Math.floor(offset / info.chunkSize);
           const last = Math.floor((offset + length - 1) / info.chunkSize);
-          await ensure(info, first, last);
-          if (files.get(file) !== info) throw new Error('File closed during read');
+          await waitForFile(file, generation, ensure(info, first, last));
+          if (fileState(file).generation !== generation || files.get(file) !== info) {
+            throw new Error('File closed during read');
+          }
           for (let i = first; i <= last; i++) {
             const chunkStart = i * info.chunkSize;
             const from = Math.max(chunkStart, offset);
@@ -323,8 +449,10 @@ addToLibrary({
         }
       },
       getSize: async (file) => {
+        const generation = fileState(file).generation;
         try {
-          return (await describe(file)).size;
+          const info = await waitForFile(file, generation, describe(file, generation));
+          return fileState(file).generation === generation && files.get(file) === info ? info.size : 0;
         } catch (failed) {
           return 0;
         }

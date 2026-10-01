@@ -5,7 +5,8 @@
 //   0x02 OPEN    conn dstIp dstPort srcPort          0x81 UDP      srcIp srcPort dstPort data
 //   0x03 DATA    conn data                           0x82 OPENED   conn
 //   0x04 CLOSE   conn                                0x83 DATA     conn data
-//                                                    0x84 CLOSE    conn refused(1 byte)
+//   0x05 NAME    UTF-8 display name                   0x84 CLOSE    conn refused(1 byte)
+//                                                    0x85 ROSTER   UTF-8 JSON
 //
 // TCP is only carried to the room itself (kServerIp); players only exchange UDP, as on the Wii.
 
@@ -14,9 +15,11 @@
 #include "web_vnet.h"
 
 #include <emscripten/em_js.h>
+#include <emscripten/em_asm.h>
 #include <emscripten/emscripten.h>
 
 #include <arpa/inet.h>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdarg>
@@ -129,6 +132,7 @@ std::string g_url;
 bool g_started = false;
 uint32_t g_localIp = 0;
 bool g_disconnected = false;
+std::atomic<bool> g_nameDirty{true};
 uint16_t g_nextPort = 49152;
 uint32_t g_nextConn = 1;
 VSocket g_sockets[kMaxSockets];
@@ -189,6 +193,16 @@ void Deliver(const uint8_t* msg, size_t size) {
             g_localIp = Get32(msg + 1);
             std::printf("[vnet] joined the room as %u.%u.%u.%u\n", g_localIp >> 24, g_localIp >> 16 & 255,
                         g_localIp >> 8 & 255, g_localIp & 255);
+            MAIN_THREAD_EM_ASM({ if (window.mkwSetGameConnection) window.mkwSetGameConnection('connected'); });
+        }
+        break;
+    case 0x85:
+        if (size > 1 && size <= 4096) {
+            MAIN_THREAD_EM_ASM({
+                if (!window.mkwRoomToken && window.mkwSetRoomPlayers) {
+                    window.mkwSetRoomPlayers(UTF8ToString($0, $1), $2 >>> 0);
+                }
+            }, msg + 1, size - 1, g_localIp);
         }
         break;
     case 0x81: {
@@ -235,7 +249,11 @@ void Start() {
     const char* room = std::getenv("MKW_WEB_ROOM");
     if (!room || !*room) return;
     g_url = room;
+    char token[65]{};
+    MAIN_THREAD_EM_ASM({ stringToUTF8(window.mkwRoomToken || '', $0, $1); }, token, sizeof(token));
+    if (*token) g_url += (g_url.find('?') == std::string::npos ? "?token=" : "&token=") + std::string(token);
     std::printf("[vnet] connecting to the online room\n");
+    MAIN_THREAD_EM_ASM({ if (window.mkwSetGameConnection) window.mkwSetGameConnection('connecting'); });
     vnet_js_open(g_url.c_str());
 }
 
@@ -243,6 +261,13 @@ void PumpNow() {
     Start();
     if (g_url.empty()) return;
     if (vnet_js_status() == 1) {
+        if (g_nameDirty.exchange(false, std::memory_order_relaxed)) {
+            char name[129]{};
+            MAIN_THREAD_EM_ASM({ stringToUTF8(window.mkwRoomName || '', $0, $1); }, name, sizeof(name));
+            std::vector<uint8_t> message{0x05};
+            message.insert(message.end(), name, name + std::strlen(name));
+            vnet_js_send(message.data(), static_cast<int>(message.size()));
+        }
         for (const auto& frame : g_outbox) vnet_js_send(frame.data(), static_cast<int>(frame.size()));
         g_outbox.clear();
     }
@@ -253,6 +278,7 @@ void PumpNow() {
     }
     if (vnet_js_status() == 3 && !g_disconnected) {
         g_disconnected = true;
+        MAIN_THREAD_EM_ASM({ if (window.mkwSetGameConnection) window.mkwSetGameConnection('disconnected'); });
         g_outbox.clear();
         for (VSocket& s : g_sockets) {
             if (!s.used) continue;
@@ -348,6 +374,10 @@ void Pump() {
 } // namespace WebVnet
 
 extern "C" {
+
+EMSCRIPTEN_KEEPALIVE void mkw_web_room_name() {
+    g_nameDirty.store(true, std::memory_order_relaxed);
+}
 
 int vnet_socket(int domain, int type, int) {
     type &= ~(SOCK_NONBLOCK | SOCK_CLOEXEC);

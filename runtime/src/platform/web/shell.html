@@ -49,6 +49,18 @@
   .note { color: var(--muted); font-size: 12px; margin: 18px 0 0; }
   #room-panel { border-bottom: 1px solid var(--line); padding-bottom: 16px; margin-bottom: 16px; }
   #room-panel h2 { margin-bottom: 10px; }
+  #room-roster { padding: 0; margin: 8px 0; list-style: none; }
+  #room-roster li { display: flex; gap: 8px; align-items: center; padding: 5px 0; overflow-wrap: anywhere; }
+  #room-roster li::before { content: ''; width: 7px; height: 7px; flex: none; border-radius: 50%; background: #67d391; }
+  #room-roster .you { margin-left: auto; color: var(--muted); font-size: 12px; }
+  #room-count { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  #room-connection { margin-top: 6px; }
+  #room-roster .presence { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+  #room-roster .you { margin-left: 0; }
+  #lobby-card { width: min(420px, calc(100% - 40px)); max-height: calc(100% - 140px); overflow-y: auto;
+    background: #111316ee; border: 1px solid var(--line); border-radius: 14px; padding: 20px; box-sizing: border-box; }
+  #lobby-card[hidden] { display: none; }
+  #lobby-card #room-panel { border: 0; padding: 0; margin: 0; }
   #room-panel input { box-sizing: border-box; width: 100%; background: var(--key-bg); color: var(--text);
     border: 1px solid var(--key-line); border-radius: 6px; padding: 8px; font: inherit; margin: 8px 0; }
   #room-panel .room-actions { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -81,6 +93,7 @@
     <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
     <button id="show-controls" class="link" hidden>Show controls</button>
     <div id="overlay">
+      <div id="lobby-card" hidden></div>
       <button id="start" disabled>Loading…</button>
       <button id="reload" hidden onclick="location.reload()">Reload</button>
       <div id="status"></div>
@@ -96,12 +109,19 @@
         <button id="join-room" class="link">Join room</button>
       </div>
       <div id="room-invite" hidden>
+        <label for="room-name">Your name</label>
+        <input id="room-name" placeholder="Choose a display name" maxlength="24" autocomplete="off" spellcheck="false">
         <label for="invite-link">Invite link</label>
         <input id="invite-link" readonly aria-label="Invite link">
         <div class="room-actions">
           <button id="copy-invite" class="link">Copy invite</button>
           <button id="leave-room" class="link">Leave room &amp; reload</button>
         </div>
+        <div class="head"><h3>In this room</h3><span id="room-count">0 / 12</span></div>
+        <ul id="room-roster" aria-label="Connected players" aria-live="polite"></ul>
+        <p id="room-connection" class="note" role="status">Start the game to connect.</p>
+        <p id="room-game-status" class="note" role="status"></p>
+        <button id="cancel-auto-join" class="link" hidden>Use menus manually</button>
       </div>
       <p id="room-message" class="note" role="status">Choose a room before starting the game.</p>
       <p class="note"><a href="https://github.com/Minithena/mariokartwebtest/tree/claude/vigilant-ride-auy5y2/tools/cloudflare/rooms" target="_blank" rel="noopener noreferrer">Room server source</a></p>
@@ -160,6 +180,69 @@
     : /^[a-z0-9]{6,32}$/.test(roomParam) ? `${roomsSocket}/v1/rooms/${roomParam}/ws` : '';
 
   const roomMessage = document.getElementById('room-message');
+  const roomPanel = document.getElementById('room-panel');
+  const roomName = document.getElementById('room-name');
+  let runtimeReady = false, runtimeFailed = false, lobbyReady = !roomUrl, gameStarted = false, lobbySocket, selfRoomId = 0;
+  const updateStartButton = () => {
+    const button = document.getElementById('start');
+    button.disabled = runtimeFailed || !runtimeReady || !lobbyReady;
+    button.textContent = !runtimeReady ? 'Loading…' : !lobbyReady ? 'Connecting…' : roomUrl ? 'Play online' : 'Start';
+  };
+  try { roomName.value = localStorage.getItem('mkw-room-name') || ''; } catch {}
+  window.mkwRoomName = roomName.value;
+  const saveRoomName = () => {
+    window.mkwRoomName = roomName.value.trim();
+    try { localStorage.setItem('mkw-room-name', window.mkwRoomName); } catch {}
+    if (lobbySocket?.readyState === WebSocket.OPEN) {
+      lobbySocket.send(JSON.stringify({ type: 'name', name: window.mkwRoomName }));
+    }
+    if (runtimeReady && typeof Module?._mkw_web_room_name === 'function') Module._mkw_web_room_name();
+  };
+  roomName.addEventListener('change', saveRoomName);
+  roomName.addEventListener('input', saveRoomName);
+  window.mkwSetRoomConnection = (state) => {
+    document.getElementById('room-connection').textContent = state === 'connecting' ? 'Connecting…'
+      : state === 'connected' ? 'Connected' : 'Disconnected. Reload to rejoin.';
+    if (state !== 'connected') {
+      document.getElementById('room-roster').replaceChildren();
+      document.getElementById('room-count').textContent = '0 / 12';
+    }
+  };
+  window.mkwSetGameConnection = (state) => {
+    document.getElementById('room-game-status').textContent = state === 'connecting' ? 'Starting game…'
+      : state === 'connected' ? '' : 'The game disconnected. Reload to reconnect.';
+  };
+  window.mkwSetAutoJoinStatus = (text, active) => {
+    document.getElementById('room-game-status').textContent = text;
+    document.getElementById('cancel-auto-join').hidden = !active;
+  };
+  document.getElementById('cancel-auto-join').addEventListener('click', () => {
+    if (typeof Module?._mkw_web_cancel_auto_join === 'function') Module._mkw_web_cancel_auto_join();
+    Module.canvas.focus();
+  });
+  window.mkwSetRoomPlayers = (json, selfId) => {
+    let roster;
+    try { roster = JSON.parse(json); } catch { return; }
+    if (!Array.isArray(roster.players) || roster.players.length > 12 ||
+        roster.players.some(p => !Number.isInteger(p.id) || typeof p.name !== 'string' || p.name.length > 96)) return;
+    const rows = roster.players.map(player => {
+      const row = document.createElement('li');
+      const name = document.createElement('span');
+      name.textContent = player.name;
+      row.append(name);
+      if (player.id === selfId) {
+        const you = document.createElement('span');
+        you.className = 'you'; you.textContent = 'You'; row.append(you);
+      }
+      const presence = document.createElement('span');
+      presence.className = 'presence'; presence.textContent = player.inGame ? 'In game' : 'In lobby';
+      row.append(presence);
+      return row;
+    });
+    document.getElementById('room-roster').replaceChildren(...rows);
+    document.getElementById('room-count').textContent = rows.length + ' / 12';
+    window.mkwSetRoomConnection('connected');
+  };
   const changeRoom = (code) => {
     const next = new URL(location.href);
     if (code) next.searchParams.set('room', code); else next.searchParams.delete('room');
@@ -167,12 +250,46 @@
     location.href = next.href;
   };
   if (roomUrl) {
+    const card = document.getElementById('lobby-card');
+    card.hidden = false;
+    card.append(roomPanel);
+    roomPanel.querySelector('h2').textContent = 'Room lobby';
     document.getElementById('room-setup').hidden = true;
     document.getElementById('room-invite').hidden = false;
     const invite = new URL(location.href);
-    for (const name of ['log', 'netlog', 'muted', 'resetsave']) invite.searchParams.delete(name);
+    for (const name of ['log', 'netlog', 'muted', 'resetsave', 'manual']) invite.searchParams.delete(name);
     document.getElementById('invite-link').value = invite.href;
-    roomMessage.textContent = 'In the game, everyone chooses Nintendo WFC → Worldwide → VS Race. Only players with this invite can match. Up to 12 players; keep the game open.';
+    roomMessage.textContent = 'Share this link to meet here. Play online connects your game profile and race data to this room, then lets you choose a character and vehicle. Only invite holders can match; this relay does not contact Nintendo. Up to 12 players.';
+    window.mkwSetRoomConnection('connecting');
+    const lobbyUrl = new URL(roomUrl);
+    lobbyUrl.pathname = lobbyUrl.pathname.replace(/\/ws$/, '/lobby');
+    lobbySocket = new WebSocket(lobbyUrl);
+    const connectTimer = setTimeout(() => {
+      if (lobbySocket.readyState === WebSocket.CONNECTING) lobbySocket.close();
+    }, 10000);
+    lobbySocket.onopen = () => { clearTimeout(connectTimer); saveRoomName(); };
+    lobbySocket.onmessage = ({ data }) => {
+      if (typeof data !== 'string' || data.length > 4096) return;
+      let message;
+      try { message = JSON.parse(data); } catch { return; }
+      if (message.type === 'welcome' && /^[a-f0-9]{32}$/.test(message.token) && Number.isInteger(message.id)) {
+        window.mkwRoomToken = message.token;
+        selfRoomId = message.id;
+        lobbyReady = true;
+        updateStartButton();
+      } else if (message.type === 'roster') {
+        window.mkwSetRoomPlayers(data, selfRoomId);
+      }
+    };
+    const lobbyDisconnected = () => {
+      clearTimeout(connectTimer);
+      lobbyReady = false;
+      window.mkwRoomToken = '';
+      window.mkwSetRoomConnection('disconnected');
+      if (!gameStarted) updateStartButton();
+    };
+    lobbySocket.onclose = lobbyDisconnected;
+    lobbySocket.onerror = lobbyDisconnected;
   } else if (roomParam) {
     roomMessage.textContent = 'That room code is not valid. Enter a code or create a room.';
   }
@@ -245,18 +362,22 @@
       if (params.has('muted')) ENV.MKW_WEB_MUTED = '1';
       if (params.has('resetsave')) ENV.MKW_WEB_RESET_SAVE = '1';
       if (roomUrl) ENV.MKW_WEB_ROOM = roomUrl;
+      if (roomUrl && !params.has('manual')) ENV.MKW_WEB_AUTO_JOIN = '1';
       if (params.has('netlog')) ENV.MKW_WEB_NETLOG = '1';
       if (params.has('log')) ENV.MKW_WEB_PERF = '1';
     }],
     print: (text) => console.log(text),
     printErr: (text) => console.error(text),
-    setStatus: (text) => { statusEl.textContent = text; },
+    setStatus: (text) => { if (!runtimeFailed) statusEl.textContent = text; },
     onRuntimeInitialized: () => {
+      if (runtimeFailed) return;
       statusEl.textContent = '';
-      startButton.disabled = false;
-      startButton.textContent = 'Start';
+      runtimeReady = true;
+      updateStartButton();
     },
     onAbort: (what) => {
+      runtimeFailed = true;
+      runtimeReady = false;
       document.getElementById('overlay').hidden = false;
       startButton.hidden = true;
       document.getElementById('reload').hidden = false;
@@ -310,7 +431,7 @@
   // Arrow keys on the slider adjust volume without also steering/navigating the game.
   for (const type of ['keydown', 'keyup']) {
     window.addEventListener(type, (event) => {
-      if (event.target === volumeSlider) event.stopImmediatePropagation();
+      if (event.target === volumeSlider || event.target === roomName) event.stopImmediatePropagation();
     }, true);
   }
   muteButton.addEventListener('click', () => {
@@ -357,6 +478,10 @@
 
   // Browsers only start audio after a user gesture, so the game waits for this click.
   startButton.addEventListener('click', () => {
+    if (runtimeFailed || !runtimeReady || !lobbyReady || gameStarted) return;
+    gameStarted = true;
+    saveRoomName();
+    controlsPanel.prepend(roomPanel);
     for (const id of ['create-room', 'join-room', 'room-code']) document.getElementById(id).disabled = true;
     document.getElementById('overlay').hidden = true;
     Module.canvas.focus();

@@ -1316,10 +1316,16 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
     GXState::CopyTextureRef* copyRef = find_copy_texture_for_texobj(obj);
     if (sameResolvedTexture) {
       if (copyRef == nullptr) {
-        s_lastNoCopyResolveRevision[i] = s_copyTextureStateRevision;
-        continue;
-      }
-      if (!is_palette_format(obj.format()) && textureBind.ref == copyRef->handle) {
+        // A zero revision marks a binding that came from an EFB-copy texture.
+        // If that copy was evicted, the unchanged GXTexObj identity must be
+        // resolved again from guest RAM instead of leaving the retired GPU
+        // texture bound (the destination may have been reused by another asset).
+        if (s_lastNoCopyResolveRevision[i] != 0) {
+          s_lastNoCopyResolveRevision[i] = s_copyTextureStateRevision;
+          continue;
+        }
+        // Fall through to rebuild the binding from the now-authoritative RAM bytes.
+      } else if (!is_palette_format(obj.format()) && textureBind.ref == copyRef->handle) {
         s_lastNoCopyResolveRevision[i] = 0;
         continue;
       }
