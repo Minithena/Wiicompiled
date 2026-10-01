@@ -2,8 +2,14 @@
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten/emscripten.h>
+extern "C" {
+// common.cpp: suspend until the next staging-map completion (or a short timeout), and wake it.
+void aurora_web_wait_for_map(void);
+void aurora_web_map_signal(void);
+}
 #endif
 #include <chrono>
+#include <cstdlib>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -55,8 +61,11 @@ public:
   void wait_for_progress() {
 #ifdef __EMSCRIPTEN__
     // Map completions are delivered from the browser event loop of this same thread, so a condition
-    // variable wait would deadlock. Yield through JSPI instead (requires -sJSPI).
-    emscripten_sleep(1);
+    // variable wait would deadlock. Suspend through JSPI until the completion callback signals:
+    // polling with emscripten_sleep(1) cost 4 ms per poll once the browser clamps nested timers,
+    // however early the GPU finished.
+    static const bool oldYield = [] { const char* v = std::getenv("MKW_WEB_OLD_YIELD"); return v && *v == '1'; }();
+    if (oldYield) emscripten_sleep(1); else aurora_web_wait_for_map();
     return;
 #else
     std::unique_lock lock(mutex_);

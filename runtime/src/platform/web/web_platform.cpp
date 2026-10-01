@@ -46,6 +46,7 @@
 
 namespace HostContext {
 extern std::atomic<uint32_t> g_webContextSwitches;
+extern std::atomic<uint64_t> g_webSwitchNanos;
 }
 
 namespace WebPlatform {
@@ -199,12 +200,13 @@ void StartWatchdog() {
                                 (uint32_t(p[2]) << 8) | uint32_t(p[3]);
             }
             std::printf("[web] watchdog: switches=%u (+%u) retracePending=%u guestThread=%08x "
-                        "osThread=%08x translated=%08x heap=%zuMB used=%zuMB\n",
+                        "osThread=%08x translated=%08x heap=%zuMB used=%zuMB switchus=%.0f\n",
                         switches, switches - lastSwitches,
                         Fiber::g_viRetracePendingCount.load(std::memory_order_relaxed),
                         Fiber::GuestFiberManager::GetCurrentGuestThreadForWatchdog(), runningThread,
                         *reinterpret_cast<const volatile uint32_t*>(translatedAddress),
-                        emscripten_get_heap_size() >> 20, size_t(mallinfo().uordblks) >> 20);
+                        emscripten_get_heap_size() >> 20, size_t(mallinfo().uordblks) >> 20,
+                        (switches - lastSwitches) ? double(HostContext::g_webSwitchNanos.exchange(0)) / 1000.0 / (switches - lastSwitches) : 0.0);
             lastSwitches = switches;
             if (WebPerformance::Enabled()) {
                 const double now = WebPerformance::Now();

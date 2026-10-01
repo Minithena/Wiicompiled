@@ -1,3 +1,6 @@
+#ifdef __EMSCRIPTEN__
+#include "platform/web/web_performance.h"
+#endif
 #include "hle_stubs.h"
 #include "memory.h"
 #include "abi_bridge.h"
@@ -159,8 +162,23 @@ std::chrono::microseconds IntervalForFormat(uint32_t tvFormat) {
 // presenter spin window). Larger windows burn a core for no visible gain.
 constexpr std::chrono::microseconds kFinalSpinWindow{500};
 
+void SleepPreciselyUntilImpl(Clock::time_point deadline, bool finishWithSpin,
+                             std::chrono::microseconds spinWindow);
+
 void SleepPreciselyUntil(Clock::time_point deadline, bool finishWithSpin = false,
                          std::chrono::microseconds spinWindow = 750us) {
+#ifdef __EMSCRIPTEN__
+    // Time spent asleep, for the "?log" report: frame time minus every sleep is the real CPU load.
+    const double started = WebPerformance::Enabled() ? WebPerformance::Now() : 0.0;
+    SleepPreciselyUntilImpl(deadline, finishWithSpin, spinWindow);
+    if (started != 0.0) WebPerformance::RecordSleep(WebPerformance::Now() - started);
+#else
+    SleepPreciselyUntilImpl(deadline, finishWithSpin, spinWindow);
+#endif
+}
+
+void SleepPreciselyUntilImpl(Clock::time_point deadline, bool finishWithSpin,
+                             std::chrono::microseconds spinWindow) {
     const auto now = Clock::now();
     if (now >= deadline) {
         return;
@@ -577,12 +595,22 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
         aurora_set_present_schedule(0, 0);
     }
 
+#ifdef __EMSCRIPTEN__
+    const bool measure = WebPerformance::Enabled();
+    const double t0 = measure ? WebPerformance::Now() : 0.0;
+#endif
     aurora_end_frame();
+#ifdef __EMSCRIPTEN__
+    const double t1 = measure ? WebPerformance::Now() : 0.0;
+#endif
     if (paceThisFrame) {
         PaceToRetraceBoundary(paceDeadline);
         std::lock_guard<std::mutex> lock(g_viMutex);
         s_lastPacedRetraceCount = g_vi.retraceCount;
     }
+#ifdef __EMSCRIPTEN__
+    const double t2 = measure ? WebPerformance::Now() : 0.0;
+#endif
     settings_overlay::AdvancePresentedFrame();
     g_auroraFrameActive.store(false, std::memory_order_release);
     g_auroraFrameHadWork.store(false, std::memory_order_release);
@@ -598,6 +626,9 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
             g_auroraFrameActive.store(true, std::memory_order_release);
         }
     }
+#ifdef __EMSCRIPTEN__
+    if (measure) WebPerformance::RecordPresentParts(t1 - t0, t2 - t1, WebPerformance::Now() - t2);
+#endif
 }
 
 // -----------------------------------------------------------------------------

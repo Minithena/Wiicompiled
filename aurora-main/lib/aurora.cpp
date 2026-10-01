@@ -52,7 +52,29 @@ void report_producer_paced(bool paced) noexcept;
 #endif
 
 #ifdef __EMSCRIPTEN__
+#include <emscripten/em_js.h>
 #include <emscripten/emscripten.h>
+
+// Lets the browser run its end-of-task work (presenting the canvas) and returns on the very next
+// task. emscripten_sleep(0) uses setTimeout, which browsers clamp to about 4 ms once timers are
+// nested, and that dead time came out of every frame's budget; a MessageChannel message is a plain
+// macrotask with no such floor.
+EM_ASYNC_JS(void, aurora_web_yield_to_browser, (), {
+  let channel = globalThis.__auroraYield;
+  if (!channel) {
+    channel = globalThis.__auroraYield = new MessageChannel();
+    channel.resolve = null;
+    channel.port1.onmessage = () => {
+      const resolve = channel.resolve;
+      channel.resolve = null;
+      if (resolve) resolve();
+    };
+  }
+  await new Promise((resolve) => {
+    channel.resolve = resolve;
+    channel.port2.postMessage(0);
+  });
+});
 #endif
 
 namespace aurora {
@@ -72,6 +94,24 @@ std::atomic<uint32_t> g_captureFrame{UINT32_MAX};
 std::string g_captureOutputPath;
 
 using PresentClock = std::chrono::steady_clock;
+
+#ifdef __EMSCRIPTEN__
+// Web frame timing for the runtime's "?log" report (nanoseconds since the last call).
+namespace {
+std::atomic<uint64_t> g_webSealNs{0}, g_webEncodeNs{0}, g_webWaitNs{0}, g_webYieldNs{0}, g_webEncodeMaxNs{0};
+void web_add_ns(std::atomic<uint64_t>& total, std::chrono::nanoseconds d) {
+  total.fetch_add(static_cast<uint64_t>(d.count()), std::memory_order_relaxed);
+}
+} // namespace
+extern "C" void aurora_web_frame_timings(double* sealMs, double* encodeMs, double* waitMs, double* yieldMs,
+                                         double* encodeMaxMs) {
+  *sealMs = g_webSealNs.exchange(0) / 1e6;
+  *encodeMs = g_webEncodeNs.exchange(0) / 1e6;
+  *waitMs = g_webWaitNs.exchange(0) / 1e6;
+  *yieldMs = g_webYieldNs.exchange(0) / 1e6;
+  *encodeMaxMs = g_webEncodeMaxNs.exchange(0) / 1e6;
+}
+#endif
 
 struct PresentTimingSample {
   PresentClock::time_point presentedAt{};
@@ -999,6 +1039,9 @@ bool present_presentation_job(const PresentationJob& job) {
           wait_until_precise(job.presentAt);
           scheduleWaitDuration = std::chrono::duration_cast<std::chrono::nanoseconds>(
               PresentClock::now() - scheduleWaitStarted);
+#ifdef __EMSCRIPTEN__
+          web_add_ns(g_webWaitNs, scheduleWaitDuration);
+#endif
         }
         // A native resize can arrive after acquisition, so drop the obsolete image and let the render
         // worker reconfigure at its ordered frame boundary.
@@ -1014,7 +1057,8 @@ bool present_presentation_job(const PresentationJob& job) {
             // wgpuSurfacePresent is unsupported on the web: the canvas is presented implicitly
             // when the task yields to the browser event loop, so suspend via JSPI for a moment.
             presentStatus = wgpu::Status::Success;
-            emscripten_sleep(0);
+            static const bool oldYield = [] { const char* v = std::getenv("MKW_WEB_OLD_YIELD"); return v && *v == '1'; }();
+            if (oldYield) emscripten_sleep(0); else aurora_web_yield_to_browser();
           }
 #else
           {
@@ -1024,6 +1068,9 @@ bool present_presentation_job(const PresentationJob& job) {
 #endif
           presentDuration = std::chrono::duration_cast<std::chrono::nanoseconds>(
               PresentClock::now() - presentStarted);
+#ifdef __EMSCRIPTEN__
+          web_add_ns(g_webYieldNs, presentDuration);
+#endif
           if (presentStatus == wgpu::Status::Success) {
             presented = true;
             record_successful_present(
@@ -1701,6 +1748,7 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
 }
 #endif
 
+
 // Synchronous frame submission: seal, encode and present inline on the calling thread. Used when
 // the frame worker is disabled (RenderDoc captures) and on the boot path.
 void end_frame_impl(bool pumpEvents, bool drainFifo) {
@@ -1716,8 +1764,22 @@ void end_frame_impl(bool pumpEvents, bool drainFifo) {
   if (drainFifo) gx::fifo::drain();
   {
     std::lock_guard gpuLock(g_rendererGpuMutex);
+#ifdef __EMSCRIPTEN__
+    const auto sealStart = PresentClock::now();
+#endif
     seal_frame_locked(sealedFrame, ctx);
+#ifdef __EMSCRIPTEN__
+    const auto encodeStart = PresentClock::now();
+    web_add_ns(g_webSealNs, encodeStart - sealStart);
+#endif
     presentationJobs = encode_sealed_frame(sealedFrame, ctx);
+#ifdef __EMSCRIPTEN__
+    const auto encoded = std::chrono::duration_cast<std::chrono::nanoseconds>(PresentClock::now() - encodeStart);
+    web_add_ns(g_webEncodeNs, encoded);
+    uint64_t peak = g_webEncodeMaxNs.load(std::memory_order_relaxed);
+    while (peak < static_cast<uint64_t>(encoded.count()) &&
+           !g_webEncodeMaxNs.compare_exchange_weak(peak, static_cast<uint64_t>(encoded.count()))) {}
+#endif
   }
   publish_presentations(std::move(presentationJobs), ctx.interpolationActive);
   record_frame_telemetry();

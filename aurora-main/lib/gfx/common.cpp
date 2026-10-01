@@ -1029,18 +1029,60 @@ void shutdown() {
   currentStagingBuffer = 0;
 }
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/em_js.h>
+EM_ASYNC_JS(void, aurora_web_wait_for_map, (), {
+  await new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      if (globalThis.__auroraMapResolve === done) globalThis.__auroraMapResolve = null;
+      resolve();
+    };
+    // The timeout only bounds the wait so the caller still re-checks for a lost device.
+    const timer = setTimeout(done, 20);
+    globalThis.__auroraMapResolve = done;
+  });
+});
+EM_JS(void, aurora_web_map_signal, (), {
+  const resolve = globalThis.__auroraMapResolve;
+  if (resolve) resolve();
+});
+#endif
+
+#ifdef __EMSCRIPTEN__
+std::atomic<uint64_t> g_webMapLatencyNs{0}, g_webMapWaitNs{0}, g_webMapCount{0};
+static std::chrono::steady_clock::time_point g_webMapRequested;
+// For the runtime's "?log" report: mean request-to-callback latency and total blocked time (ms).
+extern "C" void aurora_web_map_stats(double* latencyMs, double* waitMs) {
+  const uint64_t maps = g_webMapCount.exchange(0);
+  *latencyMs = maps ? g_webMapLatencyNs.exchange(0) / 1e6 / maps : 0.0;
+  *waitMs = g_webMapWaitNs.exchange(0) / 1e6;
+}
+#endif
+
 void map_staging_buffer() {
   const auto generation = s_mappingState.request();
   if (generation == 0) {
     return;
   }
 
+#ifdef __EMSCRIPTEN__
+  g_webMapRequested = std::chrono::steady_clock::now();
+#endif
   g_stagingBuffers[currentStagingBuffer].MapAsync(
       wgpu::MapMode::Write, 0, StagingBufferSize, wgpu::CallbackMode::AllowSpontaneous,
       [generation](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+#ifdef __EMSCRIPTEN__
+        g_webMapLatencyNs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - g_webMapRequested).count()), std::memory_order_relaxed);
+        g_webMapCount.fetch_add(1, std::memory_order_relaxed);
+#endif
         const auto result = status == wgpu::MapAsyncStatus::Success
             ? BufferMapState::Mapped : BufferMapState::Unmapped;
         if (!s_mappingState.complete(generation, result)) return;
+#ifdef __EMSCRIPTEN__
+        aurora_web_map_signal();
+#endif
         if (status == wgpu::MapAsyncStatus::CallbackCancelled || status == wgpu::MapAsyncStatus::Aborted) {
           Log.warn("Buffer mapping {}: {}", magic_enum::enum_name(status), message);
           return;
@@ -1055,6 +1097,16 @@ static bool begin_frame_impl(bool clearEfb, bool capacityResume = false) {
   {
     ZoneScopedN("Wait for buffer map");
     map_staging_buffer();
+#ifdef __EMSCRIPTEN__
+    const auto mapWaitStart = std::chrono::steady_clock::now();
+    struct MapWaitRecorder {
+      std::chrono::steady_clock::time_point start;
+      ~MapWaitRecorder() {
+        g_webMapWaitNs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - start).count()), std::memory_order_relaxed);
+      }
+    } mapWaitRecorder{mapWaitStart};
+#endif
     while (true) {
       const auto mappingState = s_mappingState.state();
       if (mappingState == BufferMapState::Mapped) {

@@ -1,3 +1,4 @@
+#include <chrono>
 #include "host_context.h"
 
 #if defined(_WIN32)
@@ -188,6 +189,19 @@ Context* g_current = nullptr;
 
 // Read by the web watchdog (web_platform.cpp) from another thread.
 std::atomic<uint32_t> g_webContextSwitches{0};
+// Time from a Switch() call to the target running again (the JSPI suspend/resume itself, not what
+// the target does), summed over all switches; reported by the watchdog.
+std::atomic<uint64_t> g_webSwitchNanos{0};
+namespace {
+std::chrono::steady_clock::time_point g_switchStamp;
+void NoteResumed()
+{
+    g_webSwitchNanos.fetch_add(
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - g_switchStamp).count()),
+        std::memory_order_relaxed);
+}
+} // namespace
 
 extern "C" {
 // Suspends the calling context until something switches back to it, after starting or resuming
@@ -200,6 +214,7 @@ void mkw_fiber_forget(Context* context);
 EMSCRIPTEN_KEEPALIVE void mkw_fiber_entry(Context* context)
 {
     g_current = context;
+    NoteResumed();
     context->entry(context->argument);
 
     // A guest fiber must return through FiberProc's scheduler handoff.
@@ -266,7 +281,9 @@ void Switch(Handle target)
 
     g_current = destination;
     g_webContextSwitches.fetch_add(1, std::memory_order_relaxed);
+    g_switchStamp = std::chrono::steady_clock::now();
     mkw_fiber_switch(source, destination);
+    NoteResumed();
     g_current = source;
 }
 

@@ -117,6 +117,12 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
     const bool measure = WebPerformance::Enabled();
     static double previousStart = 0.0, previousEnd = 0.0;
     const double start = measure ? WebPerformance::Now() : 0.0;
+    // "?burn=<ms>": synthetic per-frame CPU load, to see how the frame loop behaves when busy.
+    static const double burnMs = [] { const char* v = std::getenv("MKW_WEB_BURN"); return v ? std::atof(v) : 0.0; }();
+    if (burnMs > 0.0) {
+        const double until = WebPerformance::Now() + burnMs;
+        while (WebPerformance::Now() < until) {}
+    }
 #endif
     EnsureAuroraFrameActive();
     // GX copies are FIFO-ordered on hardware. Drain submitted draws before
