@@ -80,6 +80,11 @@
   #start:disabled { background: #555; cursor: default; }
   #reload[hidden], #start[hidden] { display: none; }
   #status { min-height: 1.4em; color: var(--muted); text-align: center; padding: 0 16px; max-width: 640px; }
+  #hint { color: var(--text, #ddd); text-align: center; padding: 8px 16px 0; max-width: 640px; line-height: 1.4; }
+  #hint[hidden], #diag[hidden] { display: none; }
+  #diag { color: var(--muted); max-width: 640px; margin-top: 10px; font-size: 13px; }
+  #diag summary { cursor: pointer; text-align: center; }
+  #diag-text { white-space: pre-wrap; word-break: break-word; margin: 8px 0 4px; user-select: text; }
   /* Narrow windows: controls go below the game. */
   @media (max-width: 760px) {
     #layout { flex-direction: column; }
@@ -97,6 +102,12 @@
       <button id="start" disabled>Loading…</button>
       <button id="reload" hidden onclick="location.reload()">Reload</button>
       <div id="status"></div>
+      <div id="hint" hidden></div>
+      <details id="diag" hidden>
+        <summary>Technical details</summary>
+        <pre id="diag-text"></pre>
+        <button type="button" id="diag-copy" class="link">Copy</button>
+      </details>
     </div>
   </div>
   <aside id="controls" aria-label="Controls">
@@ -405,7 +416,87 @@
   const missing = [];
   if (!self.crossOriginIsolated) missing.push('cross-origin isolation (serve with tools/serve.py)');
   if (!('gpu' in navigator)) missing.push('WebGPU');
-  if (!('Suspending' in WebAssembly)) missing.push('WebAssembly JSPI (Chrome 137+ or Firefox 153+)');
+  if (!('Suspending' in WebAssembly)) missing.push('WebAssembly JSPI');
+
+  // Pre-flight. `'gpu' in navigator` only proves the API exists: with hardware acceleration off, a
+  // blocklisted GPU or driver, or inside many VMs and remote desktops, requestAdapter() gives
+  // nothing and the game would stop at Start with a generic error. Ask now, say why, and collect
+  // details a player can paste into a bug report. (iOS browsers are all WebKit.)
+  const hintEl = document.getElementById('hint');
+  const diagEl = document.getElementById('diag');
+  const ua = navigator.userAgent;
+  const family = /iPhone|iPad|iPod/.test(ua) ? 'webkit'
+    : /Firefox\//.test(ua) ? 'firefox'
+    : /Chrome\/|Chromium\/|Edg\//.test(ua) ? 'chromium'
+    : /Safari\//.test(ua) ? 'webkit' : 'other';
+  const diag = [
+    'User agent: ' + ua,
+    'Cross-origin isolated: ' + self.crossOriginIsolated,
+    'navigator.gpu: ' + ('gpu' in navigator),
+    'WebAssembly JSPI: ' + ('Suspending' in WebAssembly),
+    'Device memory (GB, capped at 8): ' + (navigator.deviceMemory ?? 'unknown'),
+    'CPU threads: ' + (navigator.hardwareConcurrency ?? 'unknown'),
+  ];
+  const adviceFor = () => {
+    const needsBrowser = 'Chrome or Edge 137+, Firefox 153+ (Windows, or Apple-silicon Macs on macOS 26), or Safari 27+';
+    if (!('gpu' in navigator)) {
+      return family === 'firefox'
+        ? 'Firefox only turns WebGPU on by default on Windows and on Apple-silicon Macs (macOS 26) so far. Chrome or Edge 137 or newer works on most computers.'
+        : family === 'webkit'
+        ? 'Safari 27 or newer is needed (WebGPU and WebAssembly JSPI). On iPhone and iPad every browser uses Safari, so update iOS.'
+        : family === 'chromium'
+        ? 'Update Chrome or Edge to version 137 or newer. On Linux, WebGPU may still need turning on at chrome://flags (search for "WebGPU").'
+        : 'This game needs ' + needsBrowser + '.';
+    }
+    if (missing.some((item) => item.startsWith('a usable graphics adapter'))) {
+      return 'This browser supports WebGPU but found no graphics adapter to use. Usually hardware acceleration is off '
+        + '(Chrome and Edge: Settings → System → "Use graphics acceleration when available", then restart), the graphics '
+        + 'driver is on the browser\'s blocklist (open chrome://gpu to see), or this is a remote desktop or virtual machine. '
+        + 'Updating the graphics driver often helps.';
+    }
+    if (!('Suspending' in WebAssembly)) return 'This game needs ' + needsBrowser + '.';
+    return '';
+  };
+  const showCompat = (extra) => {
+    runtimeFailed = true;  // keeps the Start button hidden even if the runtime finishes loading
+    startButton.hidden = true;
+    overlay.hidden = false;
+    statusEl.textContent = 'This browser is missing: ' + missing.join(', ') + '.';
+    hintEl.textContent = adviceFor();
+    hintEl.hidden = !hintEl.textContent;
+    if (extra) diag.push(extra);
+    document.getElementById('diag-text').textContent = diag.join('\n');
+    diagEl.hidden = false;
+  };
+  document.getElementById('diag-copy').addEventListener('click', () => {
+    try { navigator.clipboard.writeText(diag.join('\n')); } catch (e) {}
+  });
+  const graphicsProbe = (async () => {
+    if (!('gpu' in navigator)) return;
+    let adapter = null;
+    try {
+      adapter = await navigator.gpu.requestAdapter({powerPreference: 'high-performance'});
+    } catch (e) {
+      diag.push('requestAdapter threw: ' + e);
+    }
+    if (!adapter) {
+      diag.push('requestAdapter returned no adapter');
+      missing.push('a usable graphics adapter (hardware acceleration)');
+      showCompat();
+      return;
+    }
+    try {
+      const info = adapter.info || (adapter.requestAdapterInfo ? await adapter.requestAdapterInfo() : {});
+      diag.push('Adapter: ' + [info.vendor, info.architecture, info.device, info.description].filter(Boolean).join(' / '));
+      diag.push('Fallback (software) adapter: ' + !!adapter.isFallbackAdapter);
+      const limits = ['maxTextureDimension2D', 'maxBindGroups', 'maxStorageBuffersPerShaderStage',
+        'maxStorageBuffersInVertexStage', 'maxBufferSize'];
+      diag.push('Limits: ' + limits.map((name) => name + '=' + adapter.limits[name]).join(', '));
+      diag.push('Texture compression BC: ' + adapter.features.has('texture-compression-bc'));
+    } catch (e) {
+      diag.push('adapter details unavailable: ' + e);
+    }
+  })();
 
   var Module = {
     canvas: document.getElementById('canvas'),
@@ -419,6 +510,12 @@
       // Diagnostics: ?burn=<ms> adds that much CPU work to every frame; ?oldyield restores the
       // timer-based waits (emscripten_sleep) the renderer used before the event-driven ones.
       if (params.has('burn')) ENV.MKW_WEB_BURN = params.get('burn');
+      // The race simulation keeps real time on a slow machine by skipping draws; "?nocatchup" turns
+      // that off (and so does anything that breaks the picture, which is worth reporting).
+      if (params.has('nocatchup')) ENV.MKW_WEB_NOCATCHUP = '1';
+      // The game idles every client for the frames the laggiest player lost; off by default here.
+      if (params.has('lagwait')) ENV.MKW_WEB_LAGWAIT = '1';
+      if (params.has('pacetrace')) ENV.MKW_WEB_PACE_TRACE = '1';
       if (params.has('oldyield')) ENV.MKW_WEB_OLD_YIELD = '1';
     }],
     print: (text) => console.log(text),
@@ -443,16 +540,33 @@
       // A browser known to lack a requirement fails inside the runtime too; say why, once, and do
       // not offer a Reload that cannot help.
       document.getElementById('reload').hidden = missing.length > 0;
-      statusEl.textContent = missing.length
-        ? 'This browser is missing: ' + missing.join(', ') + '.'
-        : 'The game stopped: ' + what + ' (details in the browser console).';
+      if (missing.length) {
+        showCompat('Stopped with: ' + what);
+      } else {
+        statusEl.textContent = 'The game stopped: ' + what + ' (details in the browser console).';
+        // Out of memory while the browser compiles the game's code (Firefox: "failed to allocate
+        // executable memory for module") or reserves its heap is a machine that is short of free
+        // memory, and a Reload does not help until something else is closed. A failure while starting
+        // the graphics is the other usual cause; keep what a bug report needs.
+        if (/out of memory|could not allocate|cannot enlarge/i.test(String(what))) {
+          hintEl.textContent = 'This browser ran out of memory while loading the game. The game is large, and '
+            + 'Firefox in particular limits what one page may use for compiled code, which reloading does not '
+            + 'free. Close the browser completely, open it again and load the game once, without reloading. '
+            + 'Chrome or Edge load it with much less memory. Closing other tabs and programs also helps.';
+          hintEl.hidden = false;
+        } else if (/graphics|adapter|webgpu|device/i.test(String(what))) {
+          hintEl.textContent = 'The graphics could not be started. If hardware acceleration is off in your '
+            + 'browser settings, turn it on and restart the browser; updating the graphics driver can also help.';
+          hintEl.hidden = false;
+        }
+        diag.push('Stopped with: ' + what);
+        document.getElementById('diag-text').textContent = diag.join('\n');
+        diagEl.hidden = false;
+      }
     },
   };
 
-  if (missing.length) {
-    startButton.hidden = true;
-    statusEl.textContent = 'This browser is missing: ' + missing.join(', ') + '.';
-  }
+  if (missing.length) showCompat();
 
   {
     const picture = new Image();

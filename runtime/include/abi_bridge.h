@@ -5,6 +5,7 @@
 #include "game_graphics_options.h"
 #include "runtime_log.h"
 #ifdef __EMSCRIPTEN__
+#include "platform/web/web_guest_hooks.h"
 #include "platform/web/web_room_launch.h"
 #endif
 
@@ -48,6 +49,10 @@ MKW_PPC_FORCE_INLINE bool TryHandleRuntimeCall(uint32_t target, CpuContext* ctx)
 #ifdef __EMSCRIPTEN__
     if (target == 0x80622DA0u) {
         return WebRoomLaunch::TryHandleGuestCall(target, ctx);
+    }
+    // Constants, so the ~100k generated static calls fold this away; see web_guest_hooks.cpp.
+    if (target == 0x80654B00u || target == 0x80554E6Cu || target == 0x80009988u || target == 0x8023AEACu) {
+        if (WebGuestHooks::Handle(target, ctx)) return true;
     }
 #else
     (void)target;

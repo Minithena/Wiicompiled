@@ -72,6 +72,7 @@
 #include <dolphin/vi.h>
 
 #if defined(__EMSCRIPTEN__)
+#include "platform/web/web_guest_hooks.h"
 #include "platform/web/web_platform.h"
 #endif
 
@@ -1546,6 +1547,7 @@ int main(int argc, char** argv) {
         WebPlatform::MountGame();
         WebPlatform::UsePersistentStorage();
         WebPlatform::StartWatchdog();
+        WebGuestHooks::Init();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "[web] start-up failed: %s\n", e.what());
         WebPlatform::ReportFatalError(e.what());

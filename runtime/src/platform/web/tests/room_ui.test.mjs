@@ -83,13 +83,18 @@ class FakeWebSocket {
   close() { this.readyState = 3; this.onclose?.(); }
 }
 
-function setupRoomPage(search = '?room=abcdef') {
+const workingGpu = {
+  requestAdapter: async () => ({ info: { vendor: 'test' }, limits: {}, features: new Set() }),
+};
+
+function setupRoomPage(search = '?room=abcdef', navigatorOverride = { gpu: workingGpu, userAgent: 'test' }) {
   const ids = [
     'room-message', 'room-panel', 'room-name', 'room-connection', 'room-roster', 'room-count',
     'room-game-status', 'cancel-room-launch', 'lobby-card', 'room-setup', 'room-invite',
     'invite-link', 'join-room', 'create-room', 'copy-invite', 'leave-room', 'status', 'start',
     'reload', 'overlay', 'controls', 'show-controls', 'hide-controls', 'canvas', 'volume',
     'volume-value', 'toggle-mute', 'keyboard-off', 'binding-help', 'room-code',
+    'hint', 'diag', 'diag-text', 'diag-copy',
   ];
   const elements = new Map(ids.map((id) => [id, new Element(id)]));
   elements.get('start').disabled = true;
@@ -126,7 +131,7 @@ function setupRoomPage(search = '?room=abcdef') {
     document,
     location: { href: location.href, hostname: location.hostname, search: location.search },
     window,
-    navigator: { gpu: {} },
+    navigator: navigatorOverride,
     self: { crossOriginIsolated: true },
     WebAssembly: { Suspending() {} },
     localStorage,
@@ -412,4 +417,52 @@ test('an abort remains fatal when late download and readiness callbacks arrive',
   context.window.mkwSetRoomLaunchStatus('Late direct ready.', 'ready');
   assert.equal(status.textContent, fatalMessage, 'a late room callback must not clear a fatal abort');
   assert.equal(reload.hidden, false);
+});
+
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+test('WebGPU without a graphics adapter is explained before Start and cannot be started', async () => {
+  const gpu = { requestAdapter: async () => null };
+  const { context, elements } = setupRoomPage('', { gpu, userAgent: 'Mozilla/5.0 Chrome/150.0 Safari/537.36' });
+  await settle();
+  const module = vm.runInContext('Module', context);
+  module.onRuntimeInitialized();
+
+  const start = elements.get('start');
+  assert.equal(start.hidden, true, 'a finished runtime load must not bring the Start button back');
+  assert.match(elements.get('status').textContent, /missing: a usable graphics adapter/);
+  assert.match(elements.get('hint').textContent, /hardware acceleration/);
+  assert.equal(elements.get('hint').hidden, false);
+  assert.equal(elements.get('diag').hidden, false);
+  assert.match(elements.get('diag-text').textContent, /requestAdapter returned no adapter/);
+  assert.match(elements.get('diag-text').textContent, /User agent: .*Chrome\/150/);
+});
+
+test('a browser without the WebGPU API gets advice for its own family', async () => {
+  const firefox = setupRoomPage('', { userAgent: 'Mozilla/5.0 Gecko/20100101 Firefox/156.0' });
+  await settle();
+  assert.match(firefox.elements.get('status').textContent, /missing: WebGPU\./);
+  assert.match(firefox.elements.get('hint').textContent, /Firefox only turns WebGPU on/);
+
+  const iphone = setupRoomPage('', { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0) CriOS/150 Mobile Safari/604.1' });
+  await settle();
+  assert.match(iphone.elements.get('hint').textContent, /Safari 27/);
+});
+
+test('a working adapter leaves the page alone', async () => {
+  const { context, elements } = setupRoomPage();
+  await settle();
+  assert.doesNotMatch(elements.get('status').textContent, /missing/);
+  assert.equal(elements.get('diag-text').textContent, '', 'no diagnostics are shown when nothing failed');
+  assert.equal(vm.runInContext('runtimeFailed', context), false);
+});
+
+test('running out of memory while loading explains itself and keeps the details', () => {
+  const { context, elements } = setupRoomPage('');
+  const module = vm.runInContext('Module', context);
+  module.onAbort('InternalError: out of memory');
+  assert.match(elements.get('status').textContent, /The game stopped: InternalError: out of memory/);
+  assert.match(elements.get('hint').textContent, /ran out of memory while loading/);
+  assert.equal(elements.get('hint').hidden, false);
+  assert.match(elements.get('diag-text').textContent, /Stopped with: InternalError: out of memory/);
 });

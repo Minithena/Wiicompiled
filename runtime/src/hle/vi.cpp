@@ -1,4 +1,5 @@
 #ifdef __EMSCRIPTEN__
+#include "platform/web/web_pacing.h"
 #include "platform/web/web_performance.h"
 #endif
 #include "hle_stubs.h"
@@ -169,9 +170,11 @@ void SleepPreciselyUntil(Clock::time_point deadline, bool finishWithSpin = false
                          std::chrono::microseconds spinWindow = 750us) {
 #ifdef __EMSCRIPTEN__
     // Time spent asleep, for the "?log" report: frame time minus every sleep is the real CPU load.
-    const double started = WebPerformance::Enabled() ? WebPerformance::Now() : 0.0;
+    const double started = WebPerformance::Now();
     SleepPreciselyUntilImpl(deadline, finishWithSpin, spinWindow);
-    if (started != 0.0) WebPerformance::RecordSleep(WebPerformance::Now() - started);
+    const double slept = WebPerformance::Now() - started;
+    if (WebPerformance::Enabled()) WebPerformance::RecordSleep(slept);
+    WebPacing::NoteIdleSleep(slept);
 #else
     SleepPreciselyUntilImpl(deadline, finishWithSpin, spinWindow);
 #endif
@@ -469,6 +472,27 @@ void VI_HLE_ProcessRetracesDeferred(int maxToProcess) {
         throw;
     }
     OS_HLE_EndDeferredGuestCallbacks();
+}
+
+#ifdef __EMSCRIPTEN__
+// Real-time simulation (web_guest_hooks.cpp): the game is a step behind the wall clock, so move the
+// VI timeline back one period. The next retrace is then already due, and every wait derived from
+// the timeline (VIWaitForRetrace, the present pacing, the idle poll) returns at once until the
+// clock is caught up; sleeping to the next boundary would throw the saved time away.
+void WebPacing::BorrowRetrace() {
+    std::lock_guard<std::mutex> lock(g_viMutex);
+    g_vi.lastRetrace -= g_vi.retraceInterval;
+}
+
+double WebPacing::RetraceIntervalMs() {
+    std::lock_guard<std::mutex> lock(g_viMutex);
+    return std::chrono::duration<double, std::milli>(g_vi.retraceInterval).count();
+}
+#endif
+
+uint32_t VI_HLE_GetRetraceCount() {
+    std::lock_guard<std::mutex> lock(g_viMutex);
+    return g_vi.retraceCount;
 }
 
 void VI_HLE_WaitForNextRetracePoll() {
@@ -919,7 +943,7 @@ PPC_NATIVE_OVERRIDE_VOID(801BAC48, VIGetCurrentLine_HLE_801bac48, (CpuContext* c
 extern "C" void VIWaitForRetrace_HLE_801b99ec(CpuContext* ctx)
 {
     CpuContext* cpu = ctx ? ctx : &GetPersistentCpuContext();
-    
+
     if (Fiber::GuestFiberManager::IsInitialized()) {
         const int32_t irqState = OS__DisableInterrupts_801a65ac();
         uint32_t retraceCount = 0;

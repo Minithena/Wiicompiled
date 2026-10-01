@@ -290,7 +290,7 @@ function(mkw_configure_product target)
             "--js-library=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/mkw_fibers.js"
             "--js-library=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/mkw_fetchfs.js"
             -sOFFSCREENCANVAS_SUPPORT "-sOFFSCREENCANVASES_TO_PTHREAD=#canvas"
-            -sALLOW_MEMORY_GROWTH -sINITIAL_MEMORY=536870912 -sMAXIMUM_MEMORY=4294967296
+            -sALLOW_MEMORY_GROWTH -sINITIAL_MEMORY=536870912 -sMAXIMUM_MEMORY=2147483648
             -sSTACK_SIZE=8388608 -sDEFAULT_PTHREAD_STACK_SIZE=2097152 -sPTHREAD_POOL_SIZE=24
             -sWASMFS -sFORCE_FILESYSTEM -sEXIT_RUNTIME=0 -sASSERTIONS=1 --profiling-funcs
             -sINVOKE_RUN=0 -sEXPORTED_RUNTIME_METHODS=callMain,ENV

@@ -10,6 +10,7 @@
 #if defined(__EMSCRIPTEN__)
 
 #include "web_platform.h"
+#include "web_guest_hooks.h"
 #include "web_performance.h"
 
 #include "fiber_manager.h"
@@ -211,6 +212,7 @@ void StartWatchdog() {
             if (WebPerformance::Enabled()) {
                 const double now = WebPerformance::Now();
                 WebPerformance::Report(now - previousReport);
+                WebGuestHooks::Report(now - previousReport);
                 previousReport = now;
             }
         }

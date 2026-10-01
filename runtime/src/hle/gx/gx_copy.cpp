@@ -2,6 +2,7 @@
 #include "gx_internal.h"
 
 #include "settings_overlay.h"
+#include "platform/web/web_guest_hooks.h"
 #include "platform/web/web_performance.h"
 
 #include <dolphin/gx/GXAurora.h>
@@ -114,6 +115,11 @@ PPC_NATIVE_OVERRIDE_VOID(8016fc24, GX__SetDispCopyGamma_8016fc24, (uint32_t g), 
 
 extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
 #ifdef __EMSCRIPTEN__
+    // Catch-up pacing skipped this iteration's scene draw: there is nothing new to copy, present or
+    // pace to, and returning at once is what lets the simulation get back to real time.
+    if (WebGuestHooks::ConsumeSkippedFrame()) {
+        return;
+    }
     const bool measure = WebPerformance::Enabled();
     static double previousStart = 0.0, previousEnd = 0.0;
     const double start = measure ? WebPerformance::Now() : 0.0;
