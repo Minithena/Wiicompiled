@@ -132,6 +132,14 @@ wgpu::Buffer g_storageBuffer;
 constexpr size_t FrameSlotCount = 3;
 static std::array<wgpu::Buffer, FrameSlotCount> g_stagingBuffers;
 static size_t currentStagingBuffer = 0;
+#ifdef __EMSCRIPTEN__
+// emdawnwebgpu backs every write-mode GetMappedRange with its own wasm-heap block and, on Unmap,
+// copies the whole block into the JS mapping. Mapping the full staging buffer therefore cost a
+// ~37 MiB memalign + memcpy + free every frame however little was recorded (most of the "seal"
+// time in ?log). The web build records into this one persistent block instead and copies only the
+// bytes each ring actually used with WriteMappedRange just before unmapping (end_batch_impl).
+static uint8_t* g_webStagingShadow = nullptr;
+#endif
 static StagingMapState s_mappingState;
 static wgpu::Limits g_cachedLimits;
 // Advanced once per logical frame in the seal prologue, under the renderer GPU mutex and with the
@@ -1132,11 +1140,22 @@ static bool begin_frame_impl(bool clearEfb, bool capacityResume = false) {
   g_recordingSnapshotSlot = currentStagingBuffer;
   size_t bufferOffset = 0;
   const auto& stagingBuf = g_stagingBuffers[currentStagingBuffer];
+#ifdef __EMSCRIPTEN__
+  (void)stagingBuf;
+  if (g_webStagingShadow == nullptr) {
+    g_webStagingShadow = static_cast<u8*>(std::aligned_alloc(16, StagingBufferSize));
+    ASSERT(g_webStagingShadow != nullptr, "Failed to allocate the web staging block");
+  }
+#endif
   const auto mapBuffer = [&](ByteBuffer& buf, uint64_t size) {
     if (size <= 0) {
       return;
     }
+#ifdef __EMSCRIPTEN__
+    buf = ByteBuffer{g_webStagingShadow + bufferOffset, static_cast<size_t>(size)};
+#else
     buf = ByteBuffer{static_cast<u8*>(stagingBuf.GetMappedRange(bufferOffset, size)), static_cast<size_t>(size)};
+#endif
     bufferOffset += size;
   };
   mapBuffer(g_verts, VertexBufferSize);
@@ -1235,6 +1254,25 @@ static void end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame) {
     bufferOffset += size;
     return writeSize;
   };
+#ifdef __EMSCRIPTEN__
+  {
+    // Same ring order and offsets as begin_frame_impl's mapBuffer and the copies below.
+    uint64_t shadowOffset = 0;
+    const auto upload = [&](const ByteBuffer& buf, uint64_t size) {
+      if (buf.size() > 0) {
+        g_stagingBuffers[currentStagingBuffer].WriteMappedRange(shadowOffset, buf.data(), AURORA_ALIGN(buf.size(), 4));
+      }
+      shadowOffset += size;
+    };
+    upload(g_verts, VertexBufferSize);
+    upload(g_uniforms, UniformBufferSize);
+    upload(g_indices, IndexBufferSize);
+    upload(g_storage, StorageBufferSize);
+    if constexpr (UseTextureBuffer) {
+      upload(g_textureUpload, TextureUploadSize);
+    }
+  }
+#endif
   g_stagingBuffers[currentStagingBuffer].Unmap();
   s_mappingState.reset();
   g_stats.drawCallCount = g_drawCallCount;

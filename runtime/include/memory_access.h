@@ -231,6 +231,28 @@ MKW_MEMORY_FORCE_INLINE uint8_t* ResolveRangeHost(uint32_t base, int32_t minOffs
     (void)needsRead;
     const uint32_t guestStart = base + static_cast<uint32_t>(minOffset);
     if (length == 0 || length > kPageSize || guestStart > UINT32_MAX - (length - 1)) return nullptr;
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+    // WebAssembly has no flat view, but the 1 MiB bias tables answer the same question per page:
+    // a nonzero readable bias means mapped with no pending deferred read, a nonzero writable bias
+    // additionally means no executable byte in the page, and MMIO pages have neither. Returning
+    // null here (as the checked path below does) sent every one of the ~180k resolved accesses in
+    // the translated code through an out-of-line fallback call. A range lives only between memory
+    // epoch boundaries (calls that can suspend, switch threads or run guest code), and those are
+    // the only places the tables change. Both ends must share one bias, i.e. one contiguous host
+    // mapping; length <= kPageSize means at most two pages.
+    {
+        const uintptr_t* table = needsWrite ? g_fullWritablePageBias : g_fullReadablePageBias;
+        const uint32_t firstPage = guestStart >> kPageShift;
+        const uint32_t lastPage = (guestStart + (length - 1)) >> kPageShift;
+        const uintptr_t encodedBias = table[firstPage];
+        if (encodedBias == 0 || table[lastPage] != encodedBias) return nullptr;
+        if (needsRead && needsWrite &&
+            (g_fullReadablePageBias[firstPage] != encodedBias ||
+             g_fullReadablePageBias[lastPage] != encodedBias))
+            return nullptr;
+        return reinterpret_cast<uint8_t*>((encodedBias - 1u) + guestStart);
+    }
+#endif
     if (GuestFlat::RequiresCheckedAccess()) {
         // A host page can cover multiple independently-special Wii pages.
         // Returning null keeps resolved accesses on the checked Memory::*
@@ -368,6 +390,24 @@ MKW_MEMORY_FORCE_INLINE bool TryReadGuestScalar(uint32_t address, T& outValue) {
     return true;
 }
 
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+// WebAssembly routes every translated store through TryWriteGuestScalar, so inlining the sparse
+// sub-page tier at each of ~300k store sites cost megabytes of code for a case only pages that
+// mix .text and data reach. Keep it one call away instead of on the cold slow path.
+template <typename T>
+MKW_MEMORY_NO_INLINE bool TryWriteSparseGuestScalar(uint32_t address, T value) {
+    uint8_t* ptr = nullptr;
+    if (!TryGetWritablePointerFast(address, sizeof(T), ptr)) return false;
+    if constexpr (sizeof(T) == 1) {
+        *ptr = static_cast<uint8_t>(value);
+    } else {
+        const T swapped = MaybeByteSwap(value);
+        std::memcpy(ptr, &swapped, sizeof(T));
+    }
+    return true;
+}
+#endif
+
 template <typename T>
 MKW_MEMORY_FORCE_INLINE bool TryWriteGuestScalar(uint32_t address, T value) {
     static_assert(sizeof(T) >= 1 && sizeof(T) <= kMaxFastScalarSize);
@@ -385,8 +425,13 @@ MKW_MEMORY_FORCE_INLINE bool TryWriteGuestScalar(uint32_t address, T value) {
     uint8_t* ptr = nullptr;
     if (encodedBias != 0) {
         ptr = reinterpret_cast<uint8_t*>((encodedBias - 1u) + address);
-    } else if (!TryGetWritablePointerFast(address, sizeof(T), ptr)) [[unlikely]] {
-        return false;
+    } else {
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+        return TryWriteSparseGuestScalar(address, value);
+#else
+        if (!TryGetWritablePointerFast(address, sizeof(T), ptr)) [[unlikely]]
+            return false;
+#endif
     }
     if constexpr (sizeof(T) == 1) {
         *ptr = static_cast<uint8_t>(value);
