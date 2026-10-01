@@ -295,7 +295,9 @@ function(mkw_configure_product target)
             "--js-library=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/mkw_benchmark.js"
             -sOFFSCREENCANVAS_SUPPORT "-sOFFSCREENCANVASES_TO_PTHREAD=#canvas"
             -sALLOW_MEMORY_GROWTH -sINITIAL_MEMORY=536870912 -sMAXIMUM_MEMORY=2147483648
-            -sSTACK_SIZE=8388608 -sDEFAULT_PTHREAD_STACK_SIZE=2097152 -sPTHREAD_POOL_SIZE=24
+            # The web renderer and guest fibres run inline. Start a modest pool; PROXY_TO_PTHREAD
+            # can create additional workers through the responsive browser main thread if needed.
+            -sSTACK_SIZE=8388608 -sDEFAULT_PTHREAD_STACK_SIZE=2097152 -sPTHREAD_POOL_SIZE=8
             -sWASMFS -sFORCE_FILESYSTEM -sEXIT_RUNTIME=0 -sASSERTIONS=1 --profiling-funcs
             -sINVOKE_RUN=0 -sEXPORTED_RUNTIME_METHODS=callMain,ENV
             "--shell-file=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/shell.html"

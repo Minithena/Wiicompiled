@@ -73,14 +73,16 @@
   #show-controls { position: absolute; top: 12px; right: 12px; z-index: 1; background: #000a; }
   #show-controls[hidden] { display: none; }
   #overlay { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 14px;
-             align-items: center; justify-content: center; background: #000c; z-index: 2; }
+             align-items: center; justify-content: safe center; overflow-y: auto;
+             box-sizing: border-box; padding: 20px 0; background: #000c; z-index: 2; }
+  #overlay > * { flex-shrink: 0; }
   #overlay[hidden] { display: none; }
   #start, #reload { font: inherit; font-size: 18px; padding: 12px 28px; border-radius: 999px; border: 0;
                     background: var(--accent); color: #fff; cursor: pointer; }
   #start:disabled { background: #555; cursor: default; }
   #reload[hidden], #start[hidden] { display: none; }
   #status { min-height: 1.4em; color: var(--muted); text-align: center; padding: 0 16px; max-width: 640px; }
-  #hint { color: var(--text, #ddd); text-align: center; padding: 8px 16px 0; max-width: 640px; line-height: 1.4; }
+  #hint { color: var(--text, #ddd); text-align: center; padding: 8px 16px 0; max-width: 640px; line-height: 1.4; white-space: pre-line; }
   #hint[hidden], #diag[hidden] { display: none; }
   #diag { color: var(--muted); max-width: 640px; margin-top: 10px; font-size: 13px; }
   #diag summary { cursor: pointer; text-align: center; }
@@ -150,6 +152,7 @@
       </div>
       <input id="volume" type="range" min="0" max="100" step="1" value="100" aria-label="Master volume" disabled>
     </div>
+    <p id="save-status" class="note" role="status" hidden></p>
     <p class="note" id="binding-help" role="status">Start the game, then click a key to change it.</p>
     <h3>Driving</h3>
     <dl>
@@ -416,11 +419,13 @@
     console.log('log forwarding on: ' + navigator.userAgent);
   }
   const missing = [];
+  const hasWebGPU = typeof navigator.gpu?.requestAdapter === 'function';
+  const hasJSPI = typeof WebAssembly.Suspending === 'function' && typeof WebAssembly.promising === 'function';
   if (!self.crossOriginIsolated) missing.push('cross-origin isolation (serve with tools/serve.py)');
-  if (!('gpu' in navigator)) missing.push('WebGPU');
-  if (!('Suspending' in WebAssembly)) missing.push('WebAssembly JSPI');
+  if (!hasWebGPU) missing.push('WebGPU');
+  if (!hasJSPI) missing.push('WebAssembly JSPI');
 
-  // Pre-flight. `'gpu' in navigator` only proves the API exists: with hardware acceleration off, a
+  // Pre-flight. The WebGPU API alone does not prove an adapter is available: with acceleration off, a
   // blocklisted GPU or driver, or inside many VMs and remote desktops, requestAdapter() gives
   // nothing and the game would stop at Start with a generic error. Ask now, say why, and collect
   // details a player can paste into a bug report. (iOS browsers are all WebKit.)
@@ -433,31 +438,54 @@
     : /Safari\//.test(ua) ? 'webkit' : 'other';
   const diag = [
     'User agent: ' + ua,
+    'Secure context: ' + self.isSecureContext,
     'Cross-origin isolated: ' + self.crossOriginIsolated,
-    'navigator.gpu: ' + ('gpu' in navigator),
-    'WebAssembly JSPI: ' + ('Suspending' in WebAssembly),
+    'navigator.gpu.requestAdapter: ' + (typeof navigator.gpu?.requestAdapter),
+    'WebAssembly JSPI: ' + hasJSPI,
+    'WebAssembly.Suspending: ' + (typeof WebAssembly.Suspending),
+    'WebAssembly.promising: ' + (typeof WebAssembly.promising),
     'Device memory (GB, capped at 8): ' + (navigator.deviceMemory ?? 'unknown'),
     'CPU threads: ' + (navigator.hardwareConcurrency ?? 'unknown'),
   ];
   const adviceFor = () => {
     const needsBrowser = 'Chrome or Edge 137+, Firefox 153+ (Windows, or Apple-silicon Macs on macOS 26), or Safari 27+';
-    if (!('gpu' in navigator)) {
-      return family === 'firefox'
+    const advice = [];
+    if (!hasJSPI) {
+      const jspiBrowser = family === 'webkit' ? 'Safari 27 or newer (or update iOS/iPadOS on a phone or tablet)'
+        : family === 'firefox' ? 'current Firefox (153 or newer), or current desktop Chrome or Edge (137 or newer)'
+        : 'current desktop Chrome or Edge (137 or newer)';
+      advice.push('WebAssembly JSPI is unavailable in this browser. Update to ' + jspiBrowser
+        + '. If you already enabled a JSPI flag, fully quit '
+        + 'and reopen the browser. A flag cannot add support to an older browser that does not implement it.');
+    }
+    if (!hasWebGPU) {
+      advice.push(self.isSecureContext === false
+        ? 'WebGPU needs a secure connection. Open the game using its HTTPS link.'
+        : family === 'firefox'
         ? 'Firefox only turns WebGPU on by default on Windows and on Apple-silicon Macs (macOS 26) so far. Chrome or Edge 137 or newer works on most computers.'
         : family === 'webkit'
         ? 'Safari 27 or newer is needed (WebGPU and WebAssembly JSPI). On iPhone and iPad every browser uses Safari, so update iOS.'
         : family === 'chromium'
         ? 'Update Chrome or Edge to version 137 or newer. On Linux, WebGPU may still need turning on at chrome://flags (search for "WebGPU").'
-        : 'This game needs ' + needsBrowser + '.';
+        : 'This game needs ' + needsBrowser + '.');
     }
-    if (missing.some((item) => item.startsWith('a usable graphics adapter'))) {
-      return 'This browser supports WebGPU but found no graphics adapter to use. Usually hardware acceleration is off '
-        + '(Chrome and Edge: Settings → System → "Use graphics acceleration when available", then restart), the graphics '
-        + 'driver is on the browser\'s blocklist (open chrome://gpu to see), or this is a remote desktop or virtual machine. '
-        + 'Updating the graphics driver often helps.';
+    if (missing.includes('a usable WebGPU graphics adapter')) {
+      const gpuPage = family === 'firefox' ? 'about:support (Graphics)'
+        : /Edg\//.test(ua) ? 'edge://gpu' : 'chrome://gpu';
+      advice.push('WebGPU found no usable graphics adapter. Hardware acceleration being enabled does not guarantee '
+        + 'WebGPU is available: the browser may block the GPU or driver, or a remote desktop or virtual machine may '
+        + 'hide it. Check ' + gpuPage + ' for the WebGPU status and blocking reasons, update the graphics driver, '
+        + 'then fully quit and reopen the browser. In Chrome or Edge, also check Settings → System → '
+        + '"Use graphics acceleration when available".');
     }
-    if (!('Suspending' in WebAssembly)) return 'This game needs ' + needsBrowser + '.';
-    return '';
+    if (!self.crossOriginIsolated) {
+      advice.push('This page did not receive the isolation headers the game needs. Open the hosted game link directly; '
+        + 'for a local build, use tools/serve.py.');
+    }
+    return advice.join('\n\n');
+  };
+  const updateDiagnostics = () => {
+    document.getElementById('diag-text').textContent = diag.join('\n');
   };
   const showCompat = (extra) => {
     runtimeFailed = true;  // keeps the Start button hidden even if the runtime finishes loading
@@ -467,23 +495,38 @@
     hintEl.textContent = adviceFor();
     hintEl.hidden = !hintEl.textContent;
     if (extra) diag.push(extra);
-    document.getElementById('diag-text').textContent = diag.join('\n');
+    updateDiagnostics();
     diagEl.hidden = false;
   };
-  document.getElementById('diag-copy').addEventListener('click', () => {
-    try { navigator.clipboard.writeText(diag.join('\n')); } catch (e) {}
+  document.getElementById('diag-copy').addEventListener('click', async () => {
+    const button = document.getElementById('diag-copy');
+    try {
+      await navigator.clipboard.writeText(diag.join('\n'));
+      button.textContent = 'Copied';
+    } catch {
+      button.textContent = 'Select the technical details above and copy them';
+    }
   });
   const graphicsProbe = (async () => {
-    if (!('gpu' in navigator)) return;
+    if (!hasWebGPU) return;
     let adapter = null;
-    try {
-      adapter = await navigator.gpu.requestAdapter({powerPreference: 'high-performance'});
-    } catch (e) {
-      diag.push('requestAdapter threw: ' + e);
+    // Match the renderer's order. Some browsers expose an adapter only when the browser is
+    // allowed to pick its default, or when the integrated/low-power GPU is requested.
+    for (const [label, options] of [
+      ['high-performance', {powerPreference: 'high-performance'}],
+      ['default', {}],
+      ['low-power', {powerPreference: 'low-power'}],
+    ]) {
+      try {
+        adapter = await navigator.gpu.requestAdapter(options);
+        diag.push('requestAdapter (' + label + '): ' + (adapter ? 'adapter available' : 'no adapter'));
+      } catch (e) {
+        diag.push('requestAdapter (' + label + ') threw: ' + e);
+      }
+      if (adapter) break;
     }
     if (!adapter) {
-      diag.push('requestAdapter returned no adapter');
-      missing.push('a usable graphics adapter (hardware acceleration)');
+      missing.push('a usable WebGPU graphics adapter');
       showCompat();
       return;
     }
@@ -498,11 +541,33 @@
     } catch (e) {
       diag.push('adapter details unavailable: ' + e);
     }
+    // A missing JSPI report can be visible before this asynchronous probe has finished.
+    if (!diagEl.hidden) updateDiagnostics();
+  })();
+
+  let persistentStorageAvailable = false;
+  const storageProbe = (async () => {
+    try {
+      if (typeof navigator.storage?.getDirectory !== 'function') {
+        throw new Error('Saving API unavailable');
+      }
+      // API presence alone is insufficient: private browsing and storage policies may deny it.
+      await navigator.storage.getDirectory();
+      persistentStorageAvailable = true;
+      diag.push('Persistent saving: available');
+    } catch (error) {
+      diag.push('Persistent saving: unavailable (' + error + ')');
+      const notice = document.getElementById('save-status');
+      notice.textContent = 'Saving is unavailable in this browser. Game progress and settings are lost when you reload or close this page.';
+      notice.hidden = false;
+    }
+    if (!diagEl.hidden) updateDiagnostics();
   })();
 
   var Module = {
     canvas: document.getElementById('canvas'),
     preRun: [() => {
+      if (!persistentStorageAvailable) ENV.MKW_WEB_SESSION_STORAGE = '1';
       if (params.has('muted')) ENV.MKW_WEB_MUTED = '1';
       if (params.has('resetsave')) ENV.MKW_WEB_RESET_SAVE = '1';
       if (roomUrl) ENV.MKW_WEB_ROOM = roomUrl;
@@ -564,7 +629,7 @@
           hintEl.hidden = false;
         }
         diag.push('Stopped with: ' + what);
-        document.getElementById('diag-text').textContent = diag.join('\n');
+        updateDiagnostics();
         diagEl.hidden = false;
       }
     },
@@ -646,7 +711,8 @@
     }
     document.getElementById('binding-help').textContent = bindings.editing
       ? 'Press a key or click a mouse button in the game. Cancel keeps the current binding.'
-      : 'Click a key to change it. Changes are saved in this browser.';
+      : persistentStorageAvailable ? 'Click a key to change it. Changes are saved in this browser.'
+      : 'Click a key to change it. Changes are lost when you reload or close this page.';
   };
   for (const cell of document.querySelectorAll('[data-bind]')) {
     cell.addEventListener('click', () => {
@@ -680,7 +746,29 @@
     Module.canvas.focus();
     Module.callMain([]);
   });
+
+  const loadRuntime = async () => {
+    await Promise.all([graphicsProbe, storageProbe]);
+    // The loader compiles a large Wasm module and starts workers. A failed requirement should
+    // show its remedy without downloading the game or attempting an unsupported instantiation.
+    if (runtimeFailed || missing.length) return;
+    const scripts = document.getElementById('game-runtime').content.querySelectorAll('script');
+    if (!scripts.length) throw new Error('The game loader is missing from the page');
+    for (const original of scripts) {
+      const script = document.createElement('script');
+      for (const attribute of original.attributes) script.setAttribute(attribute.name, attribute.value);
+      script.textContent = original.textContent;
+      script.addEventListener('error', () => Module.onAbort('The game loader could not be downloaded.'));
+      document.body.append(script);
+    }
+  };
 </script>
+<!-- Keep the generated loader inert until browser requirements have been checked. -->
+<template id="game-runtime">
 {{{ SCRIPT }}}
+</template>
+<script>
+  loadRuntime().catch((error) => Module.onAbort(String(error)));
+</script>
 </body>
 </html>

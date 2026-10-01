@@ -70,6 +70,10 @@ bool g_bcTexturesSupported;
 // callback free of logging, allocation, teardown and renderer state mutation.
 static std::atomic_bool g_deviceLost{false};
 static std::atomic<wgpu::DeviceLostReason> g_deviceLostReason{wgpu::DeviceLostReason::Unknown};
+// A rejected request can deliver FailedCreation after a later request has succeeded. Keep its
+// callback associated with its own generation instead of poisoning the replacement device.
+static std::mutex g_deviceLostMutex;
+static uint64_t g_deviceGeneration = 0;
 // The reason enum is almost always `Unknown`, while Dawn's message carries the real cause, so
 // keep a truncated copy. Written with a plain memcpy, published by the g_deviceLost store.
 static std::array<char, 256> g_deviceLostMessage{};
@@ -517,6 +521,63 @@ static bool create_surface() {
   return true;
 }
 
+static bool request_adapter(wgpu::BackendType backend) {
+#ifdef __EMSCRIPTEN__
+  // Match the page's pre-flight: do not refuse a browser-default or integrated GPU just because
+  // the high-performance request failed. This stays within normal browser adapter selection.
+  const std::array powerPreferences{wgpu::PowerPreference::HighPerformance,
+                                   wgpu::PowerPreference::Undefined,
+                                   wgpu::PowerPreference::LowPower};
+#else
+  const std::array powerPreferences{wgpu::PowerPreference::HighPerformance};
+#endif
+  for (const auto powerPreference : powerPreferences) {
+    const wgpu::RequestAdapterOptions options{
+        .powerPreference = powerPreference,
+        .backendType = backend,
+        .compatibleSurface = g_surface,
+    };
+    const auto future = g_instance.RequestAdapter(
+        &options, wgpu::CallbackMode::WaitAnyOnly,
+        [](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
+          if (status == wgpu::RequestAdapterStatus::Success) {
+            g_adapter = std::move(adapter);
+          } else {
+            Log.warn("Adapter request failed: {}", message);
+            const std::string_view reason{message};
+            SDL_SetError("Graphics adapter unavailable: %.*s",
+                         static_cast<int>(std::min<size_t>(reason.size(), 512)), reason.data());
+          }
+        });
+    const auto status = g_instance.WaitAny(future, 5000000000);
+    if (status != wgpu::WaitStatus::Success) {
+      Log.error("Failed to create {} adapter: {}", magic_enum::enum_name(backend),
+                magic_enum::enum_name(status));
+      SDL_SetError("Graphics adapter request did not complete within its startup deadline");
+      return false;
+    }
+    if (g_adapter) {
+      SDL_ClearError();
+      break;
+    }
+    Log.warn("No adapter with power preference {}", magic_enum::enum_name(powerPreference));
+  }
+  if (!g_adapter) {
+    Log.error("No {} adapter is available on this system", magic_enum::enum_name(backend));
+    return false;
+  }
+  return true;
+}
+
+static uint64_t begin_device_request() {
+  const std::lock_guard lock(g_deviceLostMutex);
+  ++g_deviceGeneration;
+  g_deviceLostMessage[0] = '\0';
+  g_deviceLostReason.store(wgpu::DeviceLostReason::Unknown, std::memory_order_relaxed);
+  g_deviceLost.store(false, std::memory_order_release);
+  return g_deviceGeneration;
+}
+
 bool initialize(AuroraBackend auroraBackend) {
   if (!g_instance) {
     Log.info("Creating WebGPU instance");
@@ -551,9 +612,8 @@ bool initialize(AuroraBackend auroraBackend) {
   // leftover adapter would pass the `if (!g_adapter)` guard and mismatch adapter with device.
   g_queue = {};
   g_device = {};
-  g_deviceLostReason.store(wgpu::DeviceLostReason::Unknown, std::memory_order_relaxed);
-  g_deviceLost.store(false, std::memory_order_release);
   g_adapter = {};
+  g_bcTexturesSupported = false;
   g_backendType = wgpu::BackendType::Undefined;
   {
     window::SurfaceLock surfaceLock;
@@ -561,36 +621,7 @@ bool initialize(AuroraBackend auroraBackend) {
       return false;
     }
   }
-  {
-    const wgpu::RequestAdapterOptions options{
-        .powerPreference = wgpu::PowerPreference::HighPerformance,
-        .backendType = backend,
-        .compatibleSurface = g_surface,
-    };
-    const auto future = g_instance.RequestAdapter(
-        &options, wgpu::CallbackMode::WaitAnyOnly,
-        [](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
-          if (status == wgpu::RequestAdapterStatus::Success) {
-            g_adapter = std::move(adapter);
-          } else {
-            Log.warn("Adapter request failed: {}", message);
-            const std::string_view reason{message};
-            SDL_SetError("Graphics adapter unavailable: %.*s",
-                         static_cast<int>(std::min<size_t>(reason.size(), 512)), reason.data());
-          }
-        });
-    const auto status = g_instance.WaitAny(future, 5000000000);
-    if (status != wgpu::WaitStatus::Success) {
-      Log.error("Failed to create {} adapter: {}", magic_enum::enum_name(backend),
-                magic_enum::enum_name(status));
-      SDL_SetError("Graphics adapter request did not complete within its startup deadline");
-      return false;
-    }
-    if (!g_adapter) {
-      Log.error("No {} adapter is available on this system", magic_enum::enum_name(backend));
-      return false;
-    }
-  }
+  if (!request_adapter(backend)) return false;
   g_adapter.GetInfo(&g_adapterInfo);
   g_backendType = g_adapterInfo.backendType;
   const auto backendName = magic_enum::enum_name(g_backendType);
@@ -606,7 +637,18 @@ bool initialize(AuroraBackend auroraBackend) {
            magic_enum::enum_name(g_adapterInfo.adapterType), description);
 
   uint32_t maxTextureDimension2D = 0;
+#ifdef __EMSCRIPTEN__
+  for (const bool conservative : std::array{false, true}) {
+    if (conservative) {
+      // requestDevice consumes an adapter even when it fails. Reacquire one rather than retrying
+      // a consumed adapter, and use core defaults without optional compression or enhanced limits.
+      g_adapter = {};
+      if (!request_adapter(backend)) return false;
+      g_adapter.GetInfo(&g_adapterInfo);
+    }
+#else
   {
+#endif
     wgpu::Limits supportedLimits{};
     g_adapter.GetLimits(&supportedLimits);
     maxTextureDimension2D = supportedLimits.maxTextureDimension2D;
@@ -652,7 +694,6 @@ bool initialize(AuroraBackend auroraBackend) {
     for (size_t i = 0; i < supportedFeatures.featureCount; ++i) {
       const auto feature = supportedFeatures.features[i];
       if (feature == wgpu::FeatureName::TextureCompressionBC) {
-        g_bcTexturesSupported = true;
         requiredFeatures.push_back(feature);
       }
       // The presenter calls device and queue methods while the frame worker encodes, which Dawn only
@@ -717,6 +758,13 @@ bool initialize(AuroraBackend auroraBackend) {
     deviceDescriptor.requiredFeatureCount = requiredFeatures.size();
     deviceDescriptor.requiredFeatures = requiredFeatures.data();
     deviceDescriptor.requiredLimits = &requiredLimits;
+#ifdef __EMSCRIPTEN__
+    if (conservative) {
+      deviceDescriptor.requiredFeatureCount = 0;
+      deviceDescriptor.requiredFeatures = nullptr;
+      deviceDescriptor.requiredLimits = nullptr;
+    }
+#endif
     deviceDescriptor.SetUncapturedErrorCallback(
         [](const wgpu::Device& device, wgpu::ErrorType type, wgpu::StringView message) {
           if (g_initialized.load(std::memory_order_acquire)) {
@@ -725,8 +773,9 @@ bool initialize(AuroraBackend auroraBackend) {
             Log.warn("WebGPU error {}: {}", underlying(type), message);
           }
         });
+    const uint64_t deviceGeneration = begin_device_request();
     deviceDescriptor.SetDeviceLostCallback(wgpu::CallbackMode::AllowSpontaneous,
-                                           [](const wgpu::Device& device, wgpu::DeviceLostReason reason,
+                                           [deviceGeneration](const wgpu::Device& device, wgpu::DeviceLostReason reason,
                                               wgpu::StringView message) {
                                              (void)device;
                                              // Shutdown and backend retry release the final
@@ -734,6 +783,8 @@ bool initialize(AuroraBackend auroraBackend) {
                                              if (reason == wgpu::DeviceLostReason::Destroyed) {
                                                return;
                                              }
+                                             const std::lock_guard lock(g_deviceLostMutex);
+                                             if (deviceGeneration != g_deviceGeneration) return;
                                              // Via string_view, so Dawn resolves a
                                              // WGPU_STRLEN length instead of SIZE_MAX.
                                              const std::string_view text{message};
@@ -765,8 +816,24 @@ bool initialize(AuroraBackend auroraBackend) {
       return false;
     }
     if (!g_device) {
+#ifdef __EMSCRIPTEN__
+      if (!conservative) {
+        Log.warn("Retrying graphics device with core defaults and no optional features");
+        continue;
+      }
+#endif
       return false;
     }
+#ifdef __EMSCRIPTEN__
+    wgpu::Limits deviceLimits{};
+    g_device.GetLimits(&deviceLimits);
+    // Adapter capabilities may be higher than the limits actually enabled on this device.
+    maxTextureDimension2D = deviceLimits.maxTextureDimension2D;
+    Log.info("Web graphics device profile: {} (maxTextureDimension2D={})",
+             conservative ? "core defaults" : "enhanced", maxTextureDimension2D);
+    SDL_ClearError();
+    break;
+#endif
 #ifdef WEBGPU_DAWN
     // SetLoggingCallback is a Dawn-native extension, unavailable in emdawnwebgpu
     g_device.SetLoggingCallback([](wgpu::LoggingType type, wgpu::StringView message) {
@@ -791,6 +858,8 @@ bool initialize(AuroraBackend auroraBackend) {
     });
 #endif
   }
+  g_backendType = g_adapterInfo.backendType;
+  g_bcTexturesSupported = g_device.HasFeature(wgpu::FeatureName::TextureCompressionBC);
   g_queue = g_device.GetQueue();
 
   const wgpu::Status status = g_surface.GetCapabilities(g_adapter, &g_surfaceCapabilities);

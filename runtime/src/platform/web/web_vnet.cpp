@@ -19,6 +19,7 @@
 #include <emscripten/emscripten.h>
 
 #include <arpa/inet.h>
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -35,7 +36,7 @@
 // The WebSocket lives in the JavaScript of the worker that runs the game. Incoming messages wait in
 // a queue until Pump() takes them, so nothing calls into the game from an event handler.
 EM_JS(void, vnet_js_open, (const char* url), {
-    const state = { ws: null, inbox: [], inboxBytes: 0, status: 0 };
+    const state = { ws: null, inbox: [], inboxHead: 0, inboxBytes: 0, status: 0 };
     globalThis.__mkwVnet = state;
     try {
         state.ws = new WebSocket(UTF8ToString(url));
@@ -53,7 +54,7 @@ EM_JS(void, vnet_js_open, (const char* url), {
     state.ws.onerror = () => { state.status = 3; };
     state.ws.onmessage = (e) => {
         if (!(e.data instanceof ArrayBuffer)) return;
-        if (e.data.byteLength > 70000 || state.inbox.length >= 8192 ||
+        if (e.data.byteLength > 70000 || state.inbox.length - state.inboxHead >= 8192 ||
             state.inboxBytes + e.data.byteLength > 16 * 1024 * 1024) {
             state.status = 3;
             state.ws.close(1009, 'Room receive queue full');
@@ -91,11 +92,20 @@ EM_JS(void, vnet_js_send, (const uint8_t* data, int size), {
 // Copies the next message into data; returns its size, -1 when there is none.
 EM_JS(int, vnet_js_take, (uint8_t* data, int capacity), {
     const state = globalThis.__mkwVnet;
-    if (!state || !state.inbox.length) return -1;
-    const message = state.inbox.shift();
+    if (!state || state.inboxHead >= state.inbox.length) return -1;
+    const message = state.inbox[state.inboxHead];
+    state.inbox[state.inboxHead++] = undefined; // release consumed payloads immediately
     state.inboxBytes -= message.length;
     const size = Math.min(message.length, capacity);
     HEAPU8.set(message.subarray(0, size), data);
+    if (state.inboxHead === state.inbox.length) {
+        state.inbox.length = 0;
+        state.inboxHead = 0;
+    } else if (state.inboxHead >= 1024 && state.inboxHead * 2 >= state.inbox.length) {
+        // Amortised constant-cost removal; no repeated shifting of a burst's remaining packets.
+        state.inbox = state.inbox.slice(state.inboxHead);
+        state.inboxHead = 0;
+    }
     return size;
 });
 
@@ -275,9 +285,19 @@ void PumpNow() {
         g_outbox.clear();
     }
     static std::vector<uint8_t> buffer(70000);
-    int size;
-    while ((size = vnet_js_take(buffer.data(), static_cast<int>(buffer.size()))) >= 0) {
+    // Bound each pump so a single queue drain cannot monopolize the game thread. Socket calls
+    // and the per-frame pump continue servicing the FIFO; this budget does not drop or reorder packets.
+    // After closure, drain the existing bounded queue before marking native sockets disconnected,
+    // preserving the previous delivery/EOF behaviour for their final data and control messages.
+    const bool connected = vnet_js_status() == 1;
+    const int packetBudget = connected ? 128 : 8192;
+    const size_t byteBudget = connected ? 256 * 1024 : 16 * 1024 * 1024;
+    size_t deliveredBytes = 0;
+    for (int packets = 0; packets < packetBudget && deliveredBytes < byteBudget; ++packets) {
+        const int size = vnet_js_take(buffer.data(), static_cast<int>(buffer.size()));
+        if (size < 0) break;
         Deliver(buffer.data(), static_cast<size_t>(size));
+        deliveredBytes += static_cast<size_t>(size);
     }
     if (vnet_js_status() == 3 && !g_disconnected) {
         g_disconnected = true;

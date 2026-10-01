@@ -169,7 +169,7 @@ addToLibrary({
         const url = new URL(aliases.get(key) || 'game/' + path, self.location.href);
         const info = resource(key, url, size, chunkSize, true);
         if (now) ensure(info, first, last).catch(() => { /* a demand read retries */ });
-        else jobs.push(() => ensure(info, first, last));
+        else jobs.push(() => ensure(info, first, last, true));
       }
       // Start-up reads these one after another, each a blocking round trip (0.5 s each from far
       // away; StaticR.rel alone cost 2.3 s as five serial chunks). Request them all at once.
@@ -239,14 +239,54 @@ addToLibrary({
     ]) {
       for (let i = 0; i + 1 < cup.length; i++) NEXT_COURSE.set(cup[i], cup[i + 1]);
     }
-    const relatedStarted = new Set();
+    const relatedPaths = new Map();
+    const warmPending = new Set();
+    const warmFailures = new Map();
+    const urgentWarmJobs = [], relatedWarmJobs = [];
+    const MAX_RACE_WARM_REQUESTS = 6;
+    let activeWarmJobs = 0;
     let lowerKeys = null;
     let knownSizes = null;
     let prefetchChannel = null;
 
+    function drainWarmJobs() {
+      while (activeWarmJobs < MAX_RACE_WARM_REQUESTS && (urgentWarmJobs.length || relatedWarmJobs.length)) {
+        const {info, last} = urgentWarmJobs.shift() || relatedWarmJobs.shift();
+        activeWarmJobs++;
+        ensure(info, 0, last, true).then(() => {
+          warmFailures.delete(info.key);
+        }, () => {
+          const failures = (warmFailures.get(info.key)?.count || 0) + 1;
+          warmFailures.set(info.key, {count: failures,
+            retryAt: performance.now() + Math.min(1000 * 2 ** (failures - 1), 10000)});
+        }).finally(() => {
+          warmPending.delete(info.key);
+          activeWarmJobs--;
+          drainWarmJobs();
+        });
+      }
+    }
+
+    function warmFile(target, sizes, chunkSize, urgent = false) {
+      const size = target && sizes.get(target);
+      if (!size || packedFiles.has(target) || warmPending.has(target)) return false;
+      const failure = warmFailures.get(target);
+      if (failure && performance.now() < failure.retryAt) return false;
+      const url = new URL(aliases.get(target) || target.slice(1), self.location.href);
+      const info = resource(target, url, size, chunkSize, true);
+      const last = Math.ceil(size / info.chunkSize) - 1;
+      // A completed warmup may have since lost chunks to the LRU. Inspect the cache, rather than
+      // permanently marking its filename as fetched, so a later race can warm it again.
+      if (info.chunks.size === last + 1) return false;
+      warmPending.add(target);
+      (urgent ? urgentWarmJobs : relatedWarmJobs).push({info, last});
+      drainWarmJobs();
+      return true;
+    }
+
     // The game thread posts the disc paths a race is about to read (web_race_warm.cpp): one kart
     // archive per player, which the game otherwise reads one after another, a round trip each.
-    // Only names that exist on the disc are fetched, whole, all at once.
+    // Only names that exist on the disc are fetched, whole, in bounded priority batches.
     function listenForPrefetch(sizes, chunkSize) {
       if (prefetchChannel || typeof BroadcastChannel === 'undefined') return;
       prefetchChannel = new BroadcastChannel('mkw-prefetch');
@@ -261,13 +301,7 @@ addToLibrary({
         for (const path of paths.slice(0, 96)) {
           if (typeof path !== 'string' || !/^DATA\/files\/Race\/Kart\/[A-Za-z0-9_.-]+\.szs$/.test(path)) continue;
           const target = lowerKeys.get(('/game/' + path).toLowerCase());
-          const size = target && sizes.get(target);
-          if (!size || packedFiles.has(target) || relatedStarted.has(target)) continue;
-          relatedStarted.add(target);
-          const url = new URL(aliases.get(target) || target.slice(1), self.location.href);
-          const info = resource(target, url, size, chunkSize, true);
-          ensure(info, 0, Math.ceil(size / chunkSize) - 1).catch(() => { /* a demand read retries */ });
-          started++;
+          if (warmFile(target, sizes, chunkSize, true)) started++;
         }
         console.error('[web-fetch] race prefetch: ' + started + ' of ' + paths.length + ' kart archives on the disc');
       };
@@ -278,13 +312,15 @@ addToLibrary({
     // one when the last lap starts, and is 2-17 MiB) and the next Grand Prix course. Both are
     // known the moment the first file opens, so fetch them in the background then.
     function warmRelated(key, sizes, chunkSize) {
-      if (relatedStarted.has(key)) return;
-      relatedStarted.add(key);
-      const related = [];
-      const music = /^(\/game\/DATA\/files\/sound\/strm\/.+)_n\.brstm$/i.exec(key);
-      if (music) related.push((music[1] + '_f.brstm').toLowerCase());
-      const course = /^(\/game\/DATA\/files\/Race\/Course\/)([^/]+?)(?:_d)?\.szs$/.exec(key);
-      if (course && NEXT_COURSE.has(course[2])) related.push((course[1] + NEXT_COURSE.get(course[2]) + '.szs').toLowerCase());
+      let related = relatedPaths.get(key);
+      if (!related) {
+        related = [];
+        const music = /^(\/game\/DATA\/files\/sound\/strm\/.+)_n\.brstm$/i.exec(key);
+        if (music) related.push((music[1] + '_f.brstm').toLowerCase());
+        const course = /^(\/game\/DATA\/files\/Race\/Course\/)([^/]+?)(?:_d)?\.szs$/.exec(key);
+        if (course && NEXT_COURSE.has(course[2])) related.push((course[1] + NEXT_COURSE.get(course[2]) + '.szs').toLowerCase());
+        relatedPaths.set(key, related);
+      }
       if (!related.length) return;
       if (!lowerKeys) {
         lowerKeys = new Map();
@@ -292,13 +328,9 @@ addToLibrary({
       }
       for (const lower of related) {
         const target = lowerKeys.get(lower);
-        const size = target && sizes.get(target);
-        if (!size || packedFiles.has(target) || relatedStarted.has(target)) continue;
-        relatedStarted.add(target);
-        console.error('[web-fetch] prefetching ' + target + ' (after ' + key + ')');
-        const url = new URL(aliases.get(target) || target.slice(1), self.location.href);
-        const info = resource(target, url, size, chunkSize, true);
-        ensure(info, 0, Math.ceil(size / chunkSize) - 1).catch(() => { /* a demand read retries */ });
+        if (warmFile(target, sizes, chunkSize)) {
+          console.error('[web-fetch] prefetching ' + target + ' (after ' + key + ')');
+        }
       }
     }
 
@@ -370,7 +402,7 @@ addToLibrary({
       return download;
     }
 
-    async function ensure(info, first, last) {
+    async function ensure(info, first, last, background = false) {
       // Join an earlier prefetch/read for these chunks instead of downloading them twice.
       // Recheck after waiting: another caller may already be retrying a failed prefetch.
       for (;;) {
@@ -444,6 +476,7 @@ addToLibrary({
       try {
         const response = await fetch(info.url, {
           headers: {'Range': `bytes=${start}-${end}`}, signal: controller.signal,
+          priority: background ? 'low' : 'high',
         });
         if (!response.ok) throw response;
         if (response.status === 200) {
@@ -503,7 +536,7 @@ addToLibrary({
       // Keep a few chunks ahead, issuing four-chunk batches while two remain buffered.
       // This is bounded to the current video, not a preload of the whole disc or all movies.
       if (first > end || first - lastRead - 1 > 2 || info.inflight.has(first)) return;
-      const pending = ensure(info, first, Math.min(first + 3, end));
+      const pending = ensure(info, first, Math.min(first + 3, end), true);
       info.prefetch = pending;
       pending.catch(() => {}).finally(() => {
         if (info.prefetch === pending) info.prefetch = null;

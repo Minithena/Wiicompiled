@@ -142,7 +142,7 @@ bool OpfsAvailable() {
 void UsePersistentStorage() {
     namespace fs = std::filesystem;
     std::error_code ec;
-    if (!OpfsAvailable()) {
+    if (EnvFlag("MKW_WEB_SESSION_STORAGE") || !OpfsAvailable()) {
         std::printf("[web] browser storage (OPFS) unavailable: settings and saves last this session only\n");
     } else if (backend_t opfs = wasmfs_create_opfs_backend();
                opfs && wasmfs_create_directory("/persist", 0777, opfs) == 0) {

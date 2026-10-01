@@ -19,10 +19,13 @@ function deferred() {
 
 function setup({ invalidManifest = false, ignoreRange = false, aliases = '', manifestText = manifest,
                  fileUrls = { 2: 'DATA/files/test.bin' }, contents = {}, chunkSize = 4,
-                 beforeFetch = async () => {} } = {}) {
+                 beforeFetch = async () => {}, now = () => performance.now(), cacheLimit } = {}) {
   const requests = [], errors = [], backends = {}, heap = new Uint8Array(4096);
+  const channels = [];
   let library;
-  vm.runInNewContext(source, {
+  const testSource = cacheLimit === undefined ? source
+    : source.replace('const CACHE_LIMIT = 384 * 1024 * 1024;', 'const CACHE_LIMIT = ' + cacheLimit + ';');
+  vm.runInNewContext(testSource, {
     addToLibrary(value) { library = value; },
     wasmFS$backends: backends, HEAPU8: heap,
     UTF8ToString: (s) => s,
@@ -30,6 +33,8 @@ function setup({ invalidManifest = false, ignoreRange = false, aliases = '', man
     __wasmfs_fetch_get_chunk_size: () => chunkSize,
     self: { location: { href: 'https://game.test/WiiCompiled.js' } },
     URL, TextDecoder, AbortController, crypto: webcrypto,
+    performance: { now },
+    BroadcastChannel: class { constructor(name) { this.name = name; channels.push(this); } },
     console: { error: (...args) => errors.push(args.join(' ')) },
     fetch: async (url, options = {}) => {
       requests.push({ url: String(url), options });
@@ -48,7 +53,7 @@ function setup({ invalidManifest = false, ignoreRange = false, aliases = '', man
     },
   });
   library._wasmfs_create_fetch_backend_js(1);
-  return { backend: backends[1], requests, errors, heap };
+  return { backend: backends[1], requests, errors, heap, channels };
 }
 
 test('manifest size and bytes come from one uncached GET, regardless of broken HEAD metadata', async () => {
@@ -609,6 +614,142 @@ test('a course read fetches the next Grand Prix course in the background', async
   for (let attempt = 0; attempt < 100 && requests.filter((r) => r.url.endsWith('.szs')).length < 2; attempt++) await tick();
   const archives = requests.filter((request) => request.url.endsWith('.szs')).map((request) => request.url.split('/').pop());
   assert.deepEqual(archives.sort(), ['beginner_course.szs', 'farm_course.szs']);
+});
+
+test('opening a prefetched course continues warming the following Grand Prix course', async () => {
+  const paths = ['beginner_course', 'farm_course', 'kinoko_course', 'factory_course']
+    .map(name => 'DATA/files/Race/Course/' + name + '.szs');
+  const { backend, requests, heap } = setup({
+    manifestText: manifest + paths.map(path => 'f 12 ' + path + '\n').join(''),
+    fileUrls: { 2: paths[0], 3: paths[1], 4: paths[2] },
+  });
+  assert.equal(await backend.read(2, 0, 4, 0), 4);
+  await tick();
+  assert.equal(await backend.read(3, 10, 4, 0), 4);
+  await tick();
+  assert.ok(requests.some(r => r.url.endsWith('/kinoko_course.szs')));
+  assert.equal(requests.filter(r => r.url.endsWith('/farm_course.szs')).length, 1);
+  assert.equal(new TextDecoder().decode(heap.slice(10, 14)), 'abcd');
+  assert.equal(await backend.read(4, 20, 4, 0), 4);
+  await tick();
+  assert.ok(requests.some(r => r.url.endsWith('/factory_course.szs')));
+});
+
+test('failed race warmups retry before demand, with backoff rather than a request on every read', async () => {
+  let time = 0, attempts = 0;
+  const sourcePath = 'DATA/files/Race/Course/beginner_course.szs';
+  const nextPath = 'DATA/files/Race/Course/farm_course.szs';
+  const { backend, requests } = setup({
+    manifestText: manifest + 'f 12 ' + sourcePath + '\nf 12 ' + nextPath + '\n',
+    fileUrls: { 2: sourcePath, 3: nextPath }, now: () => time,
+    beforeFetch: async url => {
+      if (url.endsWith('/farm_course.szs') && ++attempts === 1) return new Response(null, { status: 503 });
+    },
+  });
+  await backend.read(2, 0, 4, 0);
+  await tick();
+  assert.equal(attempts, 1);
+  await backend.read(2, 0, 4, 0);
+  await tick();
+  assert.equal(attempts, 1);
+  time = 1500;
+  await backend.read(2, 0, 4, 0);
+  await tick();
+  assert.equal(attempts, 2);
+  const count = requests.length;
+  assert.equal(await backend.read(3, 0, 4, 0), 4);
+  assert.equal(requests.length, count, 'the retried course should already be available');
+});
+
+test('a later race can warm related assets again after their cached bytes are evicted', async () => {
+  const start = 'DATA/files/Race/Course/beginner_course.szs';
+  const next = 'DATA/files/Race/Course/farm_course.szs';
+  const filler = 'DATA/files/filler.bin';
+  const { backend, requests } = setup({
+    manifestText: manifest + 'f 12 ' + start + '\nf 12 ' + next + '\nf 24 ' + filler + '\n',
+    fileUrls: { 2: start, 3: filler }, cacheLimit: 24,
+    contents: { [filler]: encode('abcdefghijklmnopqrstuvwx') },
+  });
+  await backend.read(2, 0, 4, 0);
+  await tick();
+  assert.equal(requests.filter(r => r.url.endsWith('/farm_course.szs')).length, 1);
+  assert.equal(await backend.read(3, 20, 24, 0), 24);
+  assert.equal(await backend.read(2, 0, 4, 0), 4);
+  await tick();
+  assert.equal(requests.filter(r => r.url.endsWith('/farm_course.szs')).length, 2);
+});
+
+test('race roster warmups are bounded, deduplicate notifications, and do not block a demand read', async () => {
+  const paths = Array.from({length: 12}, (_, i) => 'DATA/files/Race/Kart/test_kart-driver' + i + '.szs');
+  const gates = new Map(paths.map(path => [path, deferred()]));
+  let active = 0, peak = 0;
+  const { backend, requests, channels, heap } = setup({
+    manifestText: manifest + paths.map(path => 'f 12 ' + path + '\n').join(''),
+    beforeFetch: async url => {
+      const gate = gates.get(new URL(url, 'https://game.test').pathname.replace(/^\/game\//, ''));
+      if (!gate) return;
+      peak = Math.max(peak, ++active);
+      await gate.promise;
+      active--;
+    },
+  });
+  await backend.getSize(1);
+  const channel = channels.find(c => c.name === 'mkw-prefetch');
+  channel.onmessage({data: {paths}});
+  channel.onmessage({data: {paths}});
+  await tick();
+  assert.equal(requests.filter(r => r.url.includes('/Race/Kart/')).length, 6);
+  assert.equal(await backend.read(2, 0, 4, 0), 4);
+  assert.equal(new TextDecoder().decode(heap.slice(0, 4)), 'abcd');
+  assert.equal(requests.find(r => r.url.endsWith('/test.bin')).options.priority, 'high');
+  for (const gate of gates.values()) gate.resolve();
+  for (let i = 0; i < 50 && requests.filter(r => r.url.includes('/Race/Kart/')).length < 12; i++) await tick();
+  await tick();
+  assert.equal(requests.filter(r => r.url.includes('/Race/Kart/')).length, 12);
+  assert.equal(peak, 6);
+  assert.ok(requests.filter(r => r.url.includes('/Race/Kart/')).every(r => r.options.priority === 'low'));
+});
+
+test('prefetched final-lap music is readable without another network request', async () => {
+  const normal = 'DATA/files/sound/strm/n_Test_n.brstm';
+  const final = 'DATA/files/sound/strm/n_Test_f.brstm';
+  const { backend, requests, heap } = setup({
+    manifestText: manifest + 'f 12 ' + normal + '\nf 12 ' + final + '\n',
+    fileUrls: { 2: normal, 3: final },
+  });
+  await backend.read(2, 0, 4, 0);
+  await tick();
+  const count = requests.length;
+  assert.equal(await backend.read(3, 20, 4, 4), 4);
+  assert.equal(new TextDecoder().decode(heap.slice(20, 24)), 'efgh');
+  assert.equal(requests.length, count);
+});
+
+test('selected race assets take the next free warmup slot ahead of speculative related files', async () => {
+  const normals = Array.from({length: 7}, (_, i) => 'DATA/files/sound/strm/n_Test' + i + '_n.brstm');
+  const finals = normals.map(path => path.replace('_n.brstm', '_f.brstm'));
+  const kart = 'DATA/files/Race/Kart/test_kart-driver.szs';
+  const gates = new Map([...finals, kart].map(path => [path, deferred()]));
+  const { backend, requests, channels } = setup({
+    manifestText: manifest + [...normals, ...finals, kart].map(path => 'f 12 ' + path + '\n').join(''),
+    fileUrls: Object.fromEntries(normals.map((path, i) => [i + 2, path])),
+    beforeFetch: async url => {
+      const gate = gates.get(new URL(url, 'https://game.test').pathname.replace(/^\/game\//, ''));
+      if (gate) await gate.promise;
+    },
+  });
+  for (let i = 0; i < normals.length; i++) await backend.read(i + 2, 0, 4, 0);
+  channels.find(c => c.name === 'mkw-prefetch').onmessage({data: {paths: [kart]}});
+  await tick();
+  assert.equal(requests.filter(r => r.url.endsWith('_f.brstm')).length, 6);
+  assert.ok(!requests.some(r => r.url.endsWith('/test_kart-driver.szs')));
+  gates.get(finals[0]).resolve();
+  await tick();
+  await tick();
+  assert.ok(requests.some(r => r.url.endsWith('/test_kart-driver.szs')));
+  assert.ok(!requests.some(r => r.url.endsWith('/n_Test6_f.brstm')));
+  for (const gate of gates.values()) gate.resolve();
+  await tick();
 });
 
 test('a music stream over 8 MiB is still fetched whole', async () => {

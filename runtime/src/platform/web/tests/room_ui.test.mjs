@@ -87,17 +87,22 @@ const workingGpu = {
   requestAdapter: async () => ({ info: { vendor: 'test' }, limits: {}, features: new Set() }),
 };
 
-function setupRoomPage(search = '?room=abcdef', navigatorOverride = { gpu: workingGpu, userAgent: 'test' }) {
+function setupRoomPage(search = '?room=abcdef', navigatorOverride = { gpu: workingGpu, userAgent: 'test' }, pageOverride = {}) {
   const ids = [
     'room-message', 'room-panel', 'room-name', 'room-connection', 'room-roster', 'room-count',
     'room-game-status', 'cancel-room-launch', 'lobby-card', 'room-setup', 'room-invite',
     'invite-link', 'join-room', 'create-room', 'copy-invite', 'leave-room', 'status', 'start',
     'reload', 'overlay', 'controls', 'show-controls', 'hide-controls', 'canvas', 'volume',
     'volume-value', 'toggle-mute', 'keyboard-off', 'binding-help', 'room-code',
-    'hint', 'diag', 'diag-text', 'diag-copy',
+    'hint', 'diag', 'diag-text', 'diag-copy', 'game-runtime', 'save-status',
   ];
   const elements = new Map(ids.map((id) => [id, new Element(id)]));
   elements.get('start').disabled = true;
+  elements.get('diag').hidden = true;
+  elements.get('save-status').hidden = true;
+  elements.get('game-runtime').content = { querySelectorAll: () => [{
+    attributes: [{ name: 'src', value: 'WiiCompiled.js' }, { name: 'async', value: '' }], textContent: '',
+  }] };
   const roomPanel = elements.get('room-panel');
   roomPanel.heading = new Element('room-heading');
   roomPanel.children = [roomPanel.heading];
@@ -132,8 +137,8 @@ function setupRoomPage(search = '?room=abcdef', navigatorOverride = { gpu: worki
     location: { href: location.href, hostname: location.hostname, search: location.search },
     window,
     navigator: navigatorOverride,
-    self: { crossOriginIsolated: true },
-    WebAssembly: { Suspending() {} },
+    self: { crossOriginIsolated: true, isSecureContext: true },
+    WebAssembly: { Suspending() {}, promising() {} },
     localStorage,
     ENV: {},
     console,
@@ -143,9 +148,10 @@ function setupRoomPage(search = '?room=abcdef', navigatorOverride = { gpu: worki
     Image: class { set src(value) { this.source = value; } },
     addEventListener() {},
     fetch: async () => { throw new Error('unexpected fetch'); },
+    ...pageOverride,
   });
   vm.runInContext(inlineScript, context, { filename: 'shell.html inline script' });
-  return { context, elements, localValues, sockets: FakeWebSocket.instances, timers, window };
+  return { context, elements, localValues, sockets: FakeWebSocket.instances, timers, window, body };
 }
 
 function welcome(socket) {
@@ -430,11 +436,11 @@ test('WebGPU without a graphics adapter is explained before Start and cannot be 
 
   const start = elements.get('start');
   assert.equal(start.hidden, true, 'a finished runtime load must not bring the Start button back');
-  assert.match(elements.get('status').textContent, /missing: a usable graphics adapter/);
-  assert.match(elements.get('hint').textContent, /hardware acceleration/);
+  assert.match(elements.get('status').textContent, /missing: a usable WebGPU graphics adapter/);
+  assert.match(elements.get('hint').textContent, /Hardware acceleration/);
   assert.equal(elements.get('hint').hidden, false);
   assert.equal(elements.get('diag').hidden, false);
-  assert.match(elements.get('diag-text').textContent, /requestAdapter returned no adapter/);
+  assert.match(elements.get('diag-text').textContent, /requestAdapter \(high-performance\): no adapter/);
   assert.match(elements.get('diag-text').textContent, /User agent: .*Chrome\/150/);
 });
 
@@ -455,6 +461,237 @@ test('a working adapter leaves the page alone', async () => {
   assert.doesNotMatch(elements.get('status').textContent, /missing/);
   assert.equal(elements.get('diag-text').textContent, '', 'no diagnostics are shown when nothing failed');
   assert.equal(vm.runInContext('runtimeFailed', context), false);
+});
+
+test('a browser-default adapter can start when high-performance selection returns nothing', async () => {
+  const attempts = [];
+  const { context, elements, body } = setupRoomPage('', {
+    userAgent: 'test', gpu: { requestAdapter: async (options) => {
+      attempts.push(options.powerPreference || 'default');
+      return options.powerPreference ? null : workingGpu.requestAdapter();
+    } },
+  });
+  await vm.runInContext('loadRuntime()', context);
+  assert.deepEqual(attempts, ['high-performance', 'default']);
+  assert.equal(vm.runInContext('runtimeFailed', context), false);
+  assert.doesNotMatch(elements.get('status').textContent, /missing/);
+  assert.equal(body.children.length, 1, 'the loader must start after a successful fallback');
+  assert.equal(body.children[0].attributes.get('src'), 'WiiCompiled.js');
+});
+
+test('low-power selection can recover after a thrown preferred request and a null default', async () => {
+  const attempts = [];
+  const { context, body } = setupRoomPage('', {
+    userAgent: 'test', gpu: { requestAdapter: async (options) => {
+      attempts.push(options.powerPreference || 'default');
+      if (options.powerPreference === 'high-performance') throw new Error('preferred adapter unavailable');
+      return options.powerPreference === 'low-power' ? workingGpu.requestAdapter() : null;
+    } },
+  });
+  await vm.runInContext('loadRuntime()', context);
+  assert.deepEqual(attempts, ['high-performance', 'default', 'low-power']);
+  assert.equal(body.children.length, 1);
+  assert.equal(vm.runInContext('runtimeFailed', context), false);
+});
+
+test('the normal high-performance path does not request additional adapters', async () => {
+  let calls = 0;
+  const { context, body } = setupRoomPage('', {
+    userAgent: 'test', gpu: { requestAdapter: async () => { calls++; return workingGpu.requestAdapter(); } },
+  });
+  await vm.runInContext('loadRuntime()', context);
+  assert.equal(calls, 1);
+  assert.equal(body.children.length, 1);
+});
+
+test('missing JSPI or adapters never load the heavyweight game runtime', async () => {
+  for (const [navigatorOverride, pageOverride] of [
+    [{ gpu: workingGpu, userAgent: 'test' }, { WebAssembly: {} }],
+    [{ gpu: { requestAdapter: async () => null }, userAgent: 'test' }, {}],
+    [{ userAgent: 'test' }, {}],
+  ]) {
+    const { context, body } = setupRoomPage('', navigatorOverride, pageOverride);
+    await vm.runInContext('loadRuntime()', context);
+    assert.equal(body.children.length, 0);
+  }
+});
+
+test('the runtime loader waits for the asynchronous GPU probe', async () => {
+  let resolveAdapter;
+  const { context, body } = setupRoomPage('', {
+    userAgent: 'test', gpu: { requestAdapter: () => new Promise((resolve) => { resolveAdapter = resolve; }) },
+  });
+  const loading = vm.runInContext('loadRuntime()', context);
+  await settle();
+  assert.equal(body.children.length, 0);
+  resolveAdapter(await workingGpu.requestAdapter());
+  await loading;
+  assert.equal(body.children.length, 1);
+});
+
+test('a failed loader download displays an actionable abort instead of staying on Loading', async () => {
+  const { context, elements, body } = setupRoomPage('');
+  await vm.runInContext('loadRuntime()', context);
+  body.children[0].dispatch('error');
+  assert.match(elements.get('status').textContent, /The game loader could not be downloaded/);
+  assert.equal(elements.get('start').hidden, true);
+});
+
+test('denied persistent saving still loads the game and selects session-only storage', async () => {
+  const { context, elements, body } = setupRoomPage('', {
+    gpu: workingGpu, userAgent: 'test', storage: {
+      getDirectory: async () => { throw new Error('Storage access denied'); },
+    },
+  });
+  await vm.runInContext('loadRuntime()', context);
+  assert.equal(body.children.length, 1);
+  assert.equal(elements.get('save-status').hidden, false);
+  assert.match(elements.get('save-status').textContent, /reload or close this page/);
+  context.Module.preRun[0]();
+  assert.equal(context.ENV.MKW_WEB_SESSION_STORAGE, '1');
+  assert.equal(vm.runInContext('runtimeFailed', context), false);
+});
+
+test('available persistent saving does not switch to session-only storage', async () => {
+  const { context, elements } = setupRoomPage('', {
+    gpu: workingGpu, userAgent: 'test', storage: { getDirectory: async () => ({}) },
+  });
+  await vm.runInContext('loadRuntime()', context);
+  context.Module.preRun[0]();
+  assert.equal(context.ENV.MKW_WEB_SESSION_STORAGE, undefined);
+  assert.equal(elements.get('save-status').hidden, true);
+});
+
+test('an absent saving API warns about temporary progress without blocking the loader', async () => {
+  const { context, elements, body } = setupRoomPage('', { gpu: workingGpu, userAgent: 'test' });
+  await vm.runInContext('loadRuntime()', context);
+  context.Module.preRun[0]();
+  assert.equal(body.children.length, 1);
+  assert.equal(context.ENV.MKW_WEB_SESSION_STORAGE, '1');
+  assert.equal(elements.get('save-status').hidden, false);
+});
+
+test('the loader waits for the saving probe before publishing its storage choice', async () => {
+  let resolveStorage;
+  const { context, body } = setupRoomPage('', {
+    gpu: workingGpu, userAgent: 'test', storage: {
+      getDirectory: () => new Promise((resolve) => { resolveStorage = resolve; }),
+    },
+  });
+  const loading = vm.runInContext('loadRuntime()', context);
+  await settle();
+  assert.equal(body.children.length, 0);
+  resolveStorage({});
+  await loading;
+  context.Module.preRun[0]();
+  assert.equal(context.ENV.MKW_WEB_SESSION_STORAGE, undefined);
+  assert.equal(body.children.length, 1);
+});
+
+test('binding guidance describes the actual session-only or persistent saving mode', async () => {
+  for (const persistent of [false, true]) {
+    const { context, elements } = setupRoomPage('', {
+      gpu: workingGpu, userAgent: 'test',
+      storage: persistent ? { getDirectory: async () => ({}) } : undefined,
+    });
+    await vm.runInContext('loadRuntime()', context);
+    context.window.mkwSetBindings(JSON.stringify({ keyboard: true, editing: false, muted: false }));
+    assert.match(elements.get('binding-help').textContent,
+      persistent ? /saved in this browser/ : /reload or close this page/);
+  }
+});
+
+test('missing JSPI and adapter show both remedies without claiming acceleration is off', async () => {
+  const { context, elements } = setupRoomPage('', {
+    gpu: { requestAdapter: async () => null },
+    userAgent: 'Mozilla/5.0 Chrome/150.0 Safari/537.36',
+  }, { WebAssembly: {} });
+  await settle();
+  const hint = elements.get('hint').textContent;
+  assert.match(elements.get('status').textContent, /WebAssembly JSPI, a usable WebGPU graphics adapter/);
+  assert.match(hint, /WebAssembly JSPI is unavailable/);
+  assert.match(hint, /fully quit and reopen/);
+  assert.match(hint, /WebGPU found no usable graphics adapter/);
+  assert.match(hint, /Hardware acceleration being enabled does not guarantee/);
+  assert.match(hint, /chrome:\/\/gpu/);
+  assert.doesNotMatch(elements.get('status').textContent, /hardware acceleration/);
+  context.Module.onRuntimeInitialized();
+  assert.equal(elements.get('start').hidden, true);
+});
+
+test('JSPI needs both callable APIs, including when an older flag exposes only one', async () => {
+  for (const wasm of [{ Suspending() {} }, { promising() {} }, { Suspending: undefined, promising() {} }]) {
+    const { elements } = setupRoomPage('', { gpu: workingGpu, userAgent: 'test' }, { WebAssembly: wasm });
+    await settle();
+    assert.match(elements.get('status').textContent, /missing: WebAssembly JSPI\./);
+    assert.match(elements.get('diag-text').textContent, /WebAssembly JSPI: false/);
+    assert.match(elements.get('hint').textContent, /A flag cannot add support/);
+  }
+});
+
+test('successful asynchronous GPU details are included in an already visible JSPI report', async () => {
+  const { elements } = setupRoomPage('', { gpu: workingGpu, userAgent: 'test' }, { WebAssembly: {} });
+  await settle();
+  assert.match(elements.get('diag-text').textContent, /Adapter: test/);
+  assert.match(elements.get('diag-text').textContent, /requestAdapter \(high-performance\): adapter available/);
+  assert.match(elements.get('diag-text').textContent, /WebAssembly.promising: undefined/);
+});
+
+test('a present but unusable gpu property reports a missing API without crashing the page', async () => {
+  for (const gpu of [undefined, null, {}]) {
+    const { elements } = setupRoomPage('', { gpu, userAgent: 'test' });
+    await settle();
+    assert.match(elements.get('status').textContent, /missing: WebGPU\./);
+    assert.equal(elements.get('start').hidden, true);
+  }
+});
+
+test('adapter request errors retain their reason and use the browser-specific diagnostics page', async () => {
+  for (const [userAgent, diagnosticPage] of [
+    ['Mozilla/5.0 Chrome/150 Safari/537.36 Edg/150', 'edge://gpu'],
+    ['Mozilla/5.0 Firefox/156.0', 'about:support (Graphics)'],
+  ]) {
+    const { elements } = setupRoomPage('', {
+      gpu: { requestAdapter: async () => { throw new Error('driver rejected request'); } }, userAgent,
+    });
+    await settle();
+    assert.ok(elements.get('hint').textContent.includes(diagnosticPage));
+    assert.match(elements.get('diag-text').textContent, /requestAdapter \(high-performance\) threw: Error: driver rejected request/);
+    assert.doesNotMatch(elements.get('diag-text').textContent, /requestAdapter \(high-performance\): no adapter/);
+  }
+});
+
+test('a rejected clipboard promise gives a manual copy instruction', async () => {
+  const { elements } = setupRoomPage('', {
+    userAgent: 'test', clipboard: { writeText: async () => { throw new Error('permission denied'); } },
+  });
+  elements.get('diag-copy').dispatch('click');
+  await settle();
+  assert.match(elements.get('diag-copy').textContent, /Select the technical details/);
+});
+
+test('copy includes the completed GPU probe and confirms success', async () => {
+  let copied;
+  const { elements } = setupRoomPage('', {
+    gpu: workingGpu, userAgent: 'test', clipboard: { writeText: async (text) => { copied = text; } },
+  }, { WebAssembly: {} });
+  await settle();
+  elements.get('diag-copy').dispatch('click');
+  await settle();
+  assert.match(copied, /Adapter: test/);
+  assert.equal(elements.get('diag-copy').textContent, 'Copied');
+});
+
+test('insecure and unisolated pages show their connection remedies alongside JSPI advice', async () => {
+  const { elements } = setupRoomPage('', { userAgent: 'test' }, {
+    WebAssembly: {}, self: { crossOriginIsolated: false, isSecureContext: false },
+  });
+  await settle();
+  const hint = elements.get('hint').textContent;
+  assert.match(hint, /WebAssembly JSPI is unavailable/);
+  assert.match(hint, /HTTPS link/);
+  assert.match(hint, /isolation headers/);
+  assert.match(elements.get('diag-text').textContent, /Secure context: false/);
 });
 
 test('running out of memory while loading explains itself and keeps the details', () => {
