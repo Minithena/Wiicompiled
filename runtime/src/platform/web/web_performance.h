@@ -14,5 +14,12 @@ void RecordSleep(double elapsed) noexcept;
 void PushSample(double now, unsigned address) noexcept;
 void ReportSlowFrameSamples(double frameStart, double frameEnd) noexcept;
 void Report(double elapsed) noexcept;
+// Separate, low-overhead benchmark mode: no statistical profiler or per-frame console output.
+bool BenchmarkEnabled() noexcept;
+void InitializeBenchmark();
+void RecordBenchmarkStep() noexcept;
+void RecordBenchmarkOnlineCheck() noexcept;
+void RecordBenchmarkPresentation(double now, double guest, double drain, double copy,
+                                 double wait, double overlay, double present) noexcept;
 } // namespace WebPerformance
 #endif

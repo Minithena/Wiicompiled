@@ -305,6 +305,7 @@
       return row;
     });
     document.getElementById('room-roster').replaceChildren(...rows);
+    if (window.mkwBenchmarkRoster) window.mkwBenchmarkRoster(roster.players);
     document.getElementById('room-count').textContent = rows.length + ' / 12';
     window.mkwSetRoomConnection('connected');
   };
@@ -508,6 +509,8 @@
       if (directRoomJoin) ENV.MKW_WEB_DIRECT_JOIN = '1';
       if (params.has('netlog')) ENV.MKW_WEB_NETLOG = '1';
       if (params.has('log')) ENV.MKW_WEB_PERF = '1';
+      if (window.mkwBenchmarkConfig) ENV.MKW_WEB_BENCHMARK_CONFIG = JSON.stringify(window.mkwBenchmarkConfig);
+      if (['autodrive-v1', 'ghost-v1'].includes(window.mkwBenchmarkConfig?.input_recipe)) ENV.MKW_WEB_BENCHMARK_AUTODRIVE = '1';
       // Diagnostics: ?burn=<ms> adds that much CPU work to every frame; ?oldyield restores the
       // timer-based waits (emscripten_sleep) the renderer used before the event-driven ones.
       if (params.has('burn')) ENV.MKW_WEB_BURN = params.get('burn');

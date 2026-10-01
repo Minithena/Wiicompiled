@@ -1,5 +1,7 @@
 #if defined(__EMSCRIPTEN__)
 #include "web_performance.h"
+#include "runtime_config.h"
+#include "memory.h"
 
 #include <algorithm>
 #include <array>
@@ -12,6 +14,10 @@
 
 extern "C" void aurora_web_frame_timings(double*, double*, double*, double*, double*);
 extern "C" void aurora_web_map_stats(double*, double*);
+extern "C" void mkw_benchmark_init(const char*, const char*);
+extern "C" void mkw_benchmark_step(double, double, double, int, int, int, int, int, int);
+extern "C" void mkw_benchmark_online();
+extern "C" void mkw_benchmark_present(double, double, double, double, double, double, double);
 
 namespace WebPerformance {
 namespace {
@@ -37,6 +43,8 @@ Timing disc;
 Timing sleeps;
 std::array<Timing, 3> presentParts;
 std::atomic<uint32_t> frames{0}, over25{0}, over50{0}, over100{0}, discReads{0};
+// Only the cooperative game worker writes these; the diagnostic watchdog does not reset them.
+double benchmarkIdleMs = 0.0, benchmarkDiscMs = 0.0;
 } // namespace
 
 bool Enabled() noexcept {
@@ -48,6 +56,56 @@ bool Enabled() noexcept {
 }
 
 double Now() noexcept { return emscripten_get_now(); }
+
+bool BenchmarkEnabled() noexcept {
+    static const bool enabled = std::getenv("MKW_WEB_BENCHMARK_CONFIG") != nullptr;
+    return enabled;
+}
+
+void InitializeBenchmark() {
+    if (!BenchmarkEnabled()) return;
+    char settings[512];
+    std::snprintf(settings, sizeof(settings),
+        "{\"resolution_scale\":%.3f,\"interpolation_fps\":%u,\"disabled_effects\":%u,"
+        "\"skip_unready_pipelines\":%s,\"disable_copy_filter\":%s,\"audio_mix_worker\":%s,\"muted\":%s}",
+        RuntimeConfigFile::ResolutionMultiplier(), RuntimeConfigFile::FrameInterpolationFps(),
+        RuntimeConfigFile::DisabledPostProcessingPaths(),
+        RuntimeConfigFile::SkipUnreadyPipelines() ? "true" : "false",
+        RuntimeConfigFile::DisableCopyFilter() ? "true" : "false",
+        RuntimeConfigFile::AudioMixWorkerEnabled() ? "true" : "false",
+        RuntimeConfigFile::AudioMuted() ? "true" : "false");
+    mkw_benchmark_init(std::getenv("MKW_WEB_BENCHMARK_CONFIG"), settings);
+}
+
+void RecordBenchmarkStep() noexcept {
+    if (!BenchmarkEnabled()) return;
+    // Supported RMCP01: Raceinfo singleton and stage, also used by IsAtLeastStage.
+    // Stage 2 is active racing, excluding intro/countdown from the driving benchmark.
+    int stage = -1;
+    const uint32_t raceInfo = Memory::Read32(0x809BD730u);
+    if (raceInfo && Memory::Contains(raceInfo, 44)) stage = static_cast<int>(Memory::Read32(raceInfo + 40));
+    int course = -1, engine = -1, mode = -1, players = -1, firstPlayerType = -1;
+    const uint32_t scenario = Memory::Read32(0x809BD728u);
+    if (scenario && Memory::Contains(scenario, 2932)) {
+        course = static_cast<int>(Memory::Read32(scenario + 2920));
+        engine = static_cast<int>(Memory::Read32(scenario + 2924));
+        mode = static_cast<int>(Memory::Read32(scenario + 2928));
+        players = Memory::Read8(scenario + 36);
+        firstPlayerType = static_cast<int>(Memory::Read32(scenario + 56));
+    }
+    mkw_benchmark_step(Now(), benchmarkIdleMs, benchmarkDiscMs, stage,
+        course, engine, mode, players, firstPlayerType);
+    benchmarkIdleMs = benchmarkDiscMs = 0.0;
+}
+
+void RecordBenchmarkOnlineCheck() noexcept {
+    if (BenchmarkEnabled()) mkw_benchmark_online();
+}
+
+void RecordBenchmarkPresentation(double now, double guest, double drain, double copy,
+                                 double wait, double overlay, double present) noexcept {
+    if (BenchmarkEnabled()) mkw_benchmark_present(now, guest, drain, copy, wait, overlay, present);
+}
 
 void RecordFrame(double interval, double guest, double drain, double copy, double wait,
                  double overlay, double present) noexcept {
@@ -76,7 +134,10 @@ void RecordPresentParts(double endFrame, double pace, double post) noexcept {
     presentParts[2].Add(post);
 }
 
-void RecordSleep(double elapsed) noexcept { sleeps.Add(elapsed); }
+void RecordSleep(double elapsed) noexcept {
+    if (Enabled()) sleeps.Add(elapsed);
+    if (BenchmarkEnabled()) benchmarkIdleMs += elapsed;
+}
 
 void PushSample(double now, unsigned address) noexcept {
     const uint32_t index = sampleHead.load(std::memory_order_relaxed);
@@ -111,8 +172,11 @@ void ReportSlowFrameSamples(double frameStart, double frameEnd) noexcept {
 }
 
 void RecordDiscRead(double elapsed) noexcept {
-    disc.Add(elapsed);
-    discReads.fetch_add(1, std::memory_order_relaxed);
+    if (Enabled()) {
+        disc.Add(elapsed);
+        discReads.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (BenchmarkEnabled()) benchmarkDiscMs += elapsed;
 }
 
 void Report(double elapsed) noexcept {

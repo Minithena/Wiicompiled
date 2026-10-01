@@ -120,7 +120,7 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
     if (WebGuestHooks::ConsumeSkippedFrame()) {
         return;
     }
-    const bool measure = WebPerformance::Enabled();
+    const bool measure = WebPerformance::Enabled() || WebPerformance::BenchmarkEnabled();
     static double previousStart = 0.0, previousEnd = 0.0;
     const double start = measure ? WebPerformance::Now() : 0.0;
     // "?burn=<ms>": synthetic per-frame CPU load, to see how the frame loop behaves when busy.
@@ -162,10 +162,12 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
 #ifdef __EMSCRIPTEN__
     if (measure) {
         const double end = WebPerformance::Now();
-        if (previousStart != 0.0) {
+        if (previousStart != 0.0 && WebPerformance::Enabled()) {
             WebPerformance::RecordFrame(start - previousStart, start - previousEnd,
                 drained - start, copied - drained, waited - copied, overlay - waited, end - overlay);
         }
+        WebPerformance::RecordBenchmarkPresentation(end, previousEnd ? start - previousEnd : 0.0,
+            drained - start, copied - drained, waited - copied, overlay - waited, end - overlay);
         previousStart = start;
         previousEnd = end;
     }

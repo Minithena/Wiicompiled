@@ -173,7 +173,7 @@ void SleepPreciselyUntil(Clock::time_point deadline, bool finishWithSpin = false
     const double started = WebPerformance::Now();
     SleepPreciselyUntilImpl(deadline, finishWithSpin, spinWindow);
     const double slept = WebPerformance::Now() - started;
-    if (WebPerformance::Enabled()) WebPerformance::RecordSleep(slept);
+    if (WebPerformance::Enabled() || WebPerformance::BenchmarkEnabled()) WebPerformance::RecordSleep(slept);
     WebPacing::NoteIdleSleep(slept);
 #else
     SleepPreciselyUntilImpl(deadline, finishWithSpin, spinWindow);

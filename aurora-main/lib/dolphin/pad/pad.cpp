@@ -10,6 +10,10 @@
 #include <atomic>
 #include <sys/stat.h>
 #include <ranges>
+#ifdef __EMSCRIPTEN__
+#include <cstdlib>
+extern "C" uint32_t mkw_benchmark_input();
+#endif
 
 namespace {
 constexpr int32_t k_mappingsFileVersion = 3;
@@ -729,6 +733,20 @@ u32 PADRead(PADStatus* status) {
   uint32_t rumbleSupport = 0;
   for (uint32_t i = 0; i < PAD_CHANMAX; ++i) {
     memset(&status[i], 0, sizeof(PADStatus));
+#ifdef __EMSCRIPTEN__
+    // Optional, versioned benchmark controller. Normal play and stored bindings are untouched.
+    static const bool benchmarkInput = std::getenv("MKW_WEB_BENCHMARK_AUTODRIVE") != nullptr;
+    const uint32_t scripted = benchmarkInput && i == 0 && !inputBlocked ? mkw_benchmark_input() : 0;
+    if (scripted & 0x80000000u) {
+      status[i].err = PAD_ERR_NONE;
+      status[i].button = static_cast<uint16_t>(scripted);
+      status[i].stickX = static_cast<int8_t>((scripted >> 16) & 255u);
+      // Ghost-benchmark setup buttons use D-pad up/down to provide a held menu direction.
+      if (status[i].button & PAD_BUTTON_UP) status[i].stickY = 127;
+      if (status[i].button & PAD_BUTTON_DOWN) status[i].stickY = -127;
+      continue;
+    }
+#endif
     auto controller = aurora::input::get_controller_for_player(i);
     if (controller == nullptr && !g_keyboardBindings[i].m_mappingsSet) {
       status[i].err = PAD_ERR_NO_CONTROLLER;

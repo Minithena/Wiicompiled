@@ -907,7 +907,7 @@ extern "C" int32_t DVDReadPrio_8015E834(uint32_t fileInfoPtr, uint32_t bufferPtr
     std::vector<uint8_t> tempBuf;
     DvdReadContract::HostReadFailure failure;
 #ifdef __EMSCRIPTEN__
-    const double readStarted = WebPerformance::Enabled() ? WebPerformance::Now() : 0.0;
+    const double readStarted = (WebPerformance::Enabled() || WebPerformance::BenchmarkEnabled()) ? WebPerformance::Now() : 0.0;
     WebRaceWarm::OnDiscRead(HostPathText(entry.hostPath));
 #endif
     if (!DvdReadContract::ReadExact(entry.hostPath, uOffset, uLength, tempBuf, failure)) {
@@ -919,7 +919,7 @@ extern "C" int32_t DVDReadPrio_8015E834(uint32_t fileInfoPtr, uint32_t bufferPtr
         const double readMs = WebPerformance::Now() - readStarted;
         WebPerformance::RecordDiscRead(readMs);
         // A disc read blocks the whole game, so a slow one is a hitch: name the file ("?log" only).
-        if (readMs >= 30.0) {
+        if (readMs >= 30.0 && WebPerformance::Enabled()) {
             std::printf("[web-disc] read took %.0f ms: %s +%u (%u bytes)\n", readMs,
                         HostPathText(entry.hostPath).c_str(), uOffset, uLength);
         }

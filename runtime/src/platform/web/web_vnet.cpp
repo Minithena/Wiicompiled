@@ -60,7 +60,9 @@ EM_JS(void, vnet_js_open, (const char* url), {
             return;
         }
         state.inboxBytes += e.data.byteLength;
-        state.inbox.push(new Uint8Array(e.data));
+        const message = new Uint8Array(e.data);
+        if (globalThis.__mkwBenchmarkActive && message[0] === 0x81) state.benchUdpReceived = (state.benchUdpReceived || 0) + 1;
+        state.inbox.push(message);
     };
 });
 
@@ -79,6 +81,7 @@ EM_JS(void, vnet_js_send, (const uint8_t* data, int size), {
                 return;
             }
             state.ws.send(HEAPU8.slice(data, data + size));
+            if (globalThis.__mkwBenchmarkActive && HEAPU8[data] === 1) state.benchUdpSent = (state.benchUdpSent || 0) + 1;
         } catch (e) {
             state.status = 3;
         }

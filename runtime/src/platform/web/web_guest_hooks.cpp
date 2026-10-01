@@ -153,6 +153,7 @@ bool DecideSkip() {
 } // namespace
 
 void Init() {
+    WebPerformance::InitializeBenchmark();
     const char* noCatchup = std::getenv("MKW_WEB_NOCATCHUP");
     s_catchup = !(noCatchup && *noCatchup == '1');
     const char* lagwait = std::getenv("MKW_WEB_LAGWAIT");
@@ -169,9 +170,13 @@ void Init() {
 
 bool Handle(uint32_t target, CpuContext*) {
     if (target == kProcessLagFrames) {
+        WebPerformance::RecordBenchmarkOnlineCheck();
         s_lagCalls.fetch_add(1, std::memory_order_relaxed);
         return s_noLagWait;
     }
+    // Measure the simulation even with catch-up disabled; otherwise a slow-motion baseline
+    // could falsely look healthy because its simulation steps were never counted.
+    if (target == kRaceCalc) WebPerformance::RecordBenchmarkStep();
     if (!s_catchup) return false;
     if (target == kRaceCalc) {
         s_raceCalc = true;

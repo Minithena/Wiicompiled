@@ -285,10 +285,14 @@ function(mkw_configure_product target)
         # fetch-backed disc mount (web_platform.cpp).
         set_target_properties(${target} PROPERTIES SUFFIX ".html"
             LINK_DEPENDS "${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/shell.html;${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/mkw_fetchfs.js;${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/mkw_fibers.js;${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/shader_diagnostics.js;${MKW_RUNTIME_SOURCE_DIR}/assets/pipeline/initial_pipeline_cache.db")
+        set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS
+            "${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/mkw_benchmark.js"
+            "${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/benchmark_client.js")
         target_link_options(${target} PRIVATE
             --use-port=emdawnwebgpu -sJSPI -sJSPI_EXPORTS=mkw_fiber_entry -sPROXY_TO_PTHREAD
             "--js-library=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/mkw_fibers.js"
             "--js-library=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/mkw_fetchfs.js"
+            "--js-library=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/mkw_benchmark.js"
             -sOFFSCREENCANVAS_SUPPORT "-sOFFSCREENCANVASES_TO_PTHREAD=#canvas"
             -sALLOW_MEMORY_GROWTH -sINITIAL_MEMORY=536870912 -sMAXIMUM_MEMORY=2147483648
             -sSTACK_SIZE=8388608 -sDEFAULT_PTHREAD_STACK_SIZE=2097152 -sPTHREAD_POOL_SIZE=24
@@ -296,6 +300,7 @@ function(mkw_configure_product target)
             -sINVOKE_RUN=0 -sEXPORTED_RUNTIME_METHODS=callMain,ENV
             "--shell-file=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/shell.html"
             "--pre-js=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/shader_diagnostics.js"
+            "--pre-js=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/benchmark_client.js"
             "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/wii@/app/wii_bootstrap"
             "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/dsp/dsp_coef.bin@/app/dsp_coef.bin"
             # Aurora looks for it in SDL's base path ("/" on the web) and prewarms from it.
