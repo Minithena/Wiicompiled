@@ -1,4 +1,3 @@
-#include <regex>
 #include "../gfx/common.hpp"
 
 #include "../internal.hpp"
@@ -673,6 +672,39 @@ static u32 attr_comp_type_size(u8 compType) noexcept {
 // unrestricted_pointer_parameters feature: Chrome has it, Firefox (and core WGSL) do not. They
 // are only ever called with &vbuf or &abuf, so give each helper one copy per buffer with the
 // pointer replaced by that global, and retarget every call.
+//
+// This runs for every shader module, so it is a plain linear scan: the std::regex version cost
+// about 6 ms per shader natively and was the bulk of the browser's boot-time pipeline prewarm.
+static bool is_wgsl_word_char(char c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+// Appends `in` to `out` with every <name><needle> rewritten to <name><tail>, where <name> is a
+// non-empty run of word characters and, if `prefix` is given, is itself preceded by it on a word
+// boundary (the regexes `\b(\w+)<needle>` and `\bfn (\w+)<needle>` this replaces).
+static void rewrite_name_calls(std::string& out, std::string_view in, std::string_view needle,
+                               std::string_view tail, std::string_view prefix = {}) {
+  size_t cursor = 0;
+  for (size_t hit = in.find(needle); hit != std::string_view::npos; hit = in.find(needle, cursor)) {
+    size_t nameStart = hit;
+    while (nameStart > cursor && is_wgsl_word_char(in[nameStart - 1])) --nameStart;
+    bool match = nameStart < hit;
+    if (match && !prefix.empty()) {
+      match = nameStart >= cursor + prefix.size() && in.substr(nameStart - prefix.size(), prefix.size()) == prefix &&
+              (nameStart == prefix.size() || !is_wgsl_word_char(in[nameStart - prefix.size() - 1]));
+    }
+    if (!match) {
+      out.append(in, cursor, hit + 1 - cursor);
+      cursor = hit + 1;
+      continue;
+    }
+    out.append(in, cursor, hit - cursor);
+    out.append(tail);
+    cursor = hit + needle.size();
+  }
+  out.append(in, cursor, std::string_view::npos);
+}
+
 static std::string specialize_storage_pointer_params(std::string source) {
   static constexpr std::string_view kParam = "(p: ptr<storage, array<u32>>, ";
   std::string helpers;
@@ -692,19 +724,37 @@ static std::string specialize_storage_pointer_params(std::string source) {
   rest.append(source, cursor, std::string::npos);
   if (helpers.empty()) return source;
 
-  static const std::regex kDefinition(R"(\bfn (\w+)\(p: ptr<storage, array<u32>>, )");
-  static const std::regex kInnerCall(R"(\b(\w+)\(p, )");
-  static const std::regex kIndex(R"(\bp\[)");
-  static const std::regex kCall(R"(\b(\w+)\(&(vbuf|abuf), )");
   std::string specialized;
-  for (const char* buffer : {"vbuf", "abuf"}) {
-    std::string copy = std::regex_replace(helpers, kDefinition, std::string("fn $1_") + buffer + "(");
-    copy = std::regex_replace(copy, kInnerCall, std::string("$1_") + buffer + "(");
-    copy = std::regex_replace(copy, kIndex, std::string(buffer) + "[");
-    specialized += copy;
+  specialized.reserve(helpers.size() * 2);
+  std::string renamed;
+  std::string calls;
+  for (const std::string_view buffer : {"vbuf"sv, "abuf"sv}) {
+    const std::string tail = "_" + std::string(buffer) + "(";
+    renamed.clear();
+    rewrite_name_calls(renamed, helpers, kParam, tail, "fn "sv);
+    calls.clear();
+    rewrite_name_calls(calls, renamed, "(p, "sv, tail);
+    // `p[` at a word boundary indexes the buffer directly.
+    size_t pos = 0;
+    for (size_t hit = calls.find("p["); hit != std::string::npos; hit = calls.find("p[", pos)) {
+      specialized.append(calls, pos, hit - pos);
+      if (hit == 0 || !is_wgsl_word_char(calls[hit - 1])) {
+        specialized.append(buffer);
+        specialized.push_back('[');
+      } else {
+        specialized.append("p[");
+      }
+      pos = hit + 2;
+    }
+    specialized.append(calls, pos, std::string::npos);
   }
   rest.insert(insertAt, specialized);
-  return std::regex_replace(rest, kCall, "$1_$2(");
+
+  std::string vbufCalls;
+  std::string abufCalls;
+  rewrite_name_calls(vbufCalls, rest, "(&vbuf, "sv, "_vbuf("sv);
+  rewrite_name_calls(abufCalls, vbufCalls, "(&abuf, "sv, "_abuf("sv);
+  return abufCalls;
 }
 #endif
 

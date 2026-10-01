@@ -644,6 +644,13 @@ inline bool SetResolutionMultiplier(float value) {
 }
 
 inline bool SetWindowSize(uint32_t width, uint32_t height) {
+#if defined(__EMSCRIPTEN__)
+    // The page lays the canvas out, so a remembered size means nothing, and every resize would
+    // rewrite Config.toml in place: a reload in the middle of that left it empty.
+    (void)width;
+    (void)height;
+    return true;
+#endif
     if (width == 0 || height == 0) {
         return false;
     }
@@ -655,6 +662,11 @@ inline bool SetWindowSize(uint32_t width, uint32_t height) {
 }
 
 inline bool SetWindowPosition(int32_t x, int32_t y) {
+#if defined(__EMSCRIPTEN__)
+    (void)x;
+    (void)y;
+    return true;  // See SetWindowSize.
+#endif
     Mutable().windowPosX = x;
     Mutable().windowPosY = y;
     const bool wroteX = WriteSetting("video", "window_x", std::to_string(x));
@@ -805,6 +817,11 @@ inline bool SetForceAspect169(bool value) {
 }
 
 inline bool WindowPosition(int32_t& x, int32_t& y) {
+#if defined(__EMSCRIPTEN__)
+    (void)x;
+    (void)y;
+    return false;  // Sizes saved by earlier web builds are ignored too; see SetWindowSize.
+#endif
     if (!Get().windowPosX || !Get().windowPosY) {
         return false;
     }
@@ -814,10 +831,16 @@ inline bool WindowPosition(int32_t& x, int32_t& y) {
 }
 
 inline uint32_t WindowWidth(uint32_t fallback) {
+#if defined(__EMSCRIPTEN__)
+    return fallback;
+#endif
     return Get().windowWidth.value_or(fallback);
 }
 
 inline uint32_t WindowHeight(uint32_t fallback) {
+#if defined(__EMSCRIPTEN__)
+    return fallback;
+#endif
     return Get().windowHeight.value_or(fallback);
 }
 

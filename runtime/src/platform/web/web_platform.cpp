@@ -22,6 +22,8 @@
 #include <thread>
 
 #include <emscripten/em_asm.h>
+#include <emscripten/heap.h>
+#include <malloc.h>
 #include <emscripten/proxying.h>
 #include <emscripten/wasmfs.h>
 #include <pthread.h>
@@ -142,7 +144,8 @@ void UsePersistentStorage() {
         const fs::path root = fs::path("/persist") / "WiiCompiled";
         fs::create_directories(root, ec);
         const fs::path config = root / "Config.toml";
-        if (!fs::exists(config, ec)) {
+        // A file left empty (a tab closed while it was being rewritten) is as good as missing.
+        if (!fs::exists(config, ec) || fs::file_size(config, ec) == 0) {
             std::ofstream(config) << DefaultConfigText();
         }
         RuntimePlatform::g_webDataRoot = "/persist";
@@ -151,6 +154,10 @@ void UsePersistentStorage() {
     } else {
         std::printf("[web] could not mount browser storage: settings and saves last this session only\n");
     }
+
+    // The disc is always mounted here, whatever the saved file says: a damaged or hand-edited
+    // Config.toml must not leave the game without its data.
+    const_cast<RuntimeUserConfig&>(RuntimeConfigFile::Get()).dvdRoot = std::string(kGameMount) + "/DATA";
 
     // "?muted" mutes this session without changing the saved setting.
     if (EnvFlag("MKW_WEB_MUTED")) {
@@ -189,11 +196,12 @@ void StartWatchdog() {
                                 (uint32_t(p[2]) << 8) | uint32_t(p[3]);
             }
             std::printf("[web] watchdog: switches=%u (+%u) retracePending=%u guestThread=%08x "
-                        "osThread=%08x translated=%08x\n",
+                        "osThread=%08x translated=%08x heap=%zuMB used=%zuMB\n",
                         switches, switches - lastSwitches,
                         Fiber::g_viRetracePendingCount.load(std::memory_order_relaxed),
                         Fiber::GuestFiberManager::GetCurrentGuestThreadForWatchdog(), runningThread,
-                        *reinterpret_cast<const volatile uint32_t*>(translatedAddress));
+                        *reinterpret_cast<const volatile uint32_t*>(translatedAddress),
+                        emscripten_get_heap_size() >> 20, size_t(mallinfo().uordblks) >> 20);
             lastSwitches = switches;
             if (WebPerformance::Enabled()) {
                 const double now = WebPerformance::Now();

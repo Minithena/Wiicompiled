@@ -983,6 +983,12 @@ static void pipeline_cache_writer() {
 static std::atomic_bool g_prewarmActive{false};
 static std::chrono::steady_clock::time_point g_prewarmStart{};
 static uint32_t g_prewarmCount = 0;
+#ifdef __EMSCRIPTEN__
+// Telemetry for the "Pipeline prewarm finished" line: batches run, pipelines built in them, time in
+// them, the longest batch and how many batches were deferred for a long frame.
+static uint32_t g_prewarmBatches = 0, g_prewarmBuilt = 0, g_prewarmDeferred = 0;
+static double g_prewarmBuildMs = 0.0, g_prewarmMaxBatchMs = 0.0;
+#endif
 
 static void note_pipeline_queue_drained() {
   if (!g_prewarmActive.exchange(false, std::memory_order_acq_rel)) {
@@ -999,6 +1005,10 @@ static void note_pipeline_queue_drained() {
            "loaded)",
            g_prewarmCount, elapsed.count() / 1000.0, stats.hits, stats.lookups, stats.stores,
            static_cast<double>(stats.hitBytes) / (1024.0 * 1024.0));
+#ifdef __EMSCRIPTEN__
+  Log.info("Pipeline prewarm batches: {} built in {} batches ({:.0f} ms total, longest {:.1f} ms), {} deferred",
+           g_prewarmBuilt, g_prewarmBatches, g_prewarmBuildMs, g_prewarmMaxBatchMs, g_prewarmDeferred);
+#endif
 }
 
 static void compile_pending_pipeline(PendingPipeline pending) {
@@ -1059,6 +1069,55 @@ static void pipeline_worker() {
   }
 }
 
+#ifdef __EMSCRIPTEN__
+// Browser pipelines are created on the render thread at a few ms each, so a fixed count per frame
+// turned boot into a 5-20 FPS slideshow. Queued pipelines are built only in the idle part of a
+// 60 Hz frame (the rest of it is spent waiting for vsync); a frame that is already long defers
+// them, but the queue is never starved for more than a few frames. Pipelines a draw needs are
+// still created on demand by find_pipeline_impl.
+constexpr double WebFrameBudgetMs = 13.0;
+constexpr double WebMaxPrewarmMs = 6.0;
+constexpr uint32_t WebMaxDeferredFrames = 4;
+static std::chrono::steady_clock::time_point g_pipelineFrameStart = std::chrono::steady_clock::now();
+static uint32_t g_deferredPrewarmFrames = 0;
+
+static void build_synchronous_pipelines_for_frame() {
+  using Clock = std::chrono::steady_clock;
+  const auto now = Clock::now();
+  const double usedMs = std::chrono::duration<double, std::milli>(now - g_pipelineFrameStart).count();
+  const double budgetMs = std::clamp(WebFrameBudgetMs - usedMs, 0.0, WebMaxPrewarmMs);
+  {
+    std::lock_guard lock{g_pipelineMutex};
+    if (g_priorityPipelines.empty() && g_backgroundPipelines.empty()) {
+      return;
+    }
+  }
+  if (budgetMs <= 0.0 && ++g_deferredPrewarmFrames < WebMaxDeferredFrames) {
+    ++g_prewarmDeferred;
+    return;
+  }
+  g_deferredPrewarmFrames = 0;
+  ++g_prewarmBatches;
+  const auto deadline = now + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double, std::milli>(budgetMs));
+  do {
+    PendingPipeline pending;
+    {
+      std::lock_guard lock{g_pipelineMutex};
+      if (g_priorityPipelines.empty() && g_backgroundPipelines.empty()) {
+        return;
+      }
+      auto& source = !g_priorityPipelines.empty() ? g_priorityPipelines : g_backgroundPipelines;
+      pending = std::move(source.front());
+      source.pop_front();
+    }
+    compile_pending_pipeline(std::move(pending));
+    ++g_prewarmBuilt;
+  } while (Clock::now() < deadline);
+  const double batchMs = std::chrono::duration<double, std::milli>(Clock::now() - now).count();
+  g_prewarmBuildMs += batchMs;
+  g_prewarmMaxBatchMs = std::max(g_prewarmMaxBatchMs, batchMs);
+}
+#else
 static void build_synchronous_pipelines_for_frame() {
   while (g_pipelinesPerFrame < BuildPipelinesPerFrame) {
     PendingPipeline pending;
@@ -1075,6 +1134,7 @@ static void build_synchronous_pipelines_for_frame() {
     ++g_pipelinesPerFrame;
   }
 }
+#endif
 
 static size_t pipeline_worker_count() {
   const size_t logicalProcessors = std::thread::hardware_concurrency();
@@ -1386,6 +1446,9 @@ void shutdown_pipeline_cache() {
 
 void begin_pipeline_frame() {
   g_pipelineFrameActive = true;
+#ifdef __EMSCRIPTEN__
+  g_pipelineFrameStart = std::chrono::steady_clock::now();
+#endif
   if (!g_hasPipelineThread) {
     g_pipelinesPerFrame = 0;
   }
