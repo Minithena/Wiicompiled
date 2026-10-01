@@ -499,7 +499,7 @@ test('file handles share cached resources until their final reference is freed',
   assert.equal(requests.length, 3);
 });
 
-test('video warmups fetch only the start of each clip, with a 128 MiB budget and two concurrent jobs', async () => {
+test('video warmups fetch only the start of each clip, with a 160 MiB budget and two concurrent jobs', async () => {
   const mb = 1024 * 1024, rows = [];
   for (let index = 0; index < 80; index++) {
     const path = 'DATA/files/thp/course/test' + index + '.thp';
@@ -520,10 +520,10 @@ test('video warmups fetch only the start of each clip, with a 128 MiB budget and
     },
   });
   assert.ok(await backend.getSize(1) > 0);
-  for (let attempt = 0; attempt < 100 && (requests.length < 65 || active); attempt++) await tick();
+  for (let attempt = 0; attempt < 100 && (requests.length < 81 || active); attempt++) await tick();
   await tick();
   assert.equal(peak, 2);
-  assert.equal(requests.length, 65); // manifest plus 64 two-MiB prefixes
+  assert.equal(requests.length, 81); // manifest plus 80 two-MiB prefixes
 });
 
 test('startup warms the shared race archives and the sound blocks a race fetches at its start', async () => {
@@ -638,4 +638,28 @@ test('looking up a course or stream size alone does not prefetch its related fil
   assert.equal(await backend.getSize(2), 2 * mb);
   for (let attempt = 0; attempt < 20; attempt++) await tick();
   assert.equal(requests.filter((request) => request.url.endsWith('.szs')).length, 0);
+});
+
+test('start-up files are requested at once, and .rel/.arc files are fetched whole', async () => {
+  const mb = 1024 * 1024;
+  const files = [['rel/StaticR.rel', 5 * mb], ['contents/HomeButton.arc', 2 * mb], ['Boot/Strap/eu/English.szs', mb / 4],
+                 ['contents/RFLRes01.arc', mb / 2]];
+  const { backend, requests } = setup({
+    manifestText: manifest + files.map(([path, size]) => 'f ' + size + ' DATA/files/' + path).join('\n') + '\n', chunkSize: mb,
+    fileUrls: { 2: 'DATA/files/rel/StaticR.rel' },
+    beforeFetch: async (url, options) => {
+      if (/manifest/.test(url)) return;
+      const [from, to] = options.headers.Range.slice(6).split('-').map(Number);
+      return new Response(new Uint8Array(to - from + 1), { status: 206 });
+    },
+  });
+  assert.ok(await backend.getSize(1) > 0);
+  for (let attempt = 0; attempt < 100 && requests.length < 5; attempt++) await tick();
+  const ranges = Object.fromEntries(requests.filter((r) => !/manifest/.test(r.url))
+    .map((r) => [r.url.split('/').pop(), r.options.headers.Range]));
+  assert.equal(ranges['StaticR.rel'], 'bytes=0-' + (5 * mb - 1));
+  assert.equal(ranges['HomeButton.arc'], 'bytes=0-' + (2 * mb - 1));
+  assert.ok(ranges['English.szs'] && ranges['RFLRes01.arc']);
+  assert.equal(await backend.read(2, 10, 16, 4 * mb), 16);
+  assert.equal(requests.filter((r) => r.url.endsWith('StaticR.rel')).length, 1);
 });

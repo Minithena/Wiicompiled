@@ -157,8 +157,8 @@ addToLibrary({
       if (warmingStarted) return;
       warmingStarted = true;
       const jobs = [];
-      let remaining = 128 * 1024 * 1024;
-      function queue(path, start = 0, length = Infinity) {
+      let remaining = 160 * 1024 * 1024;
+      function queue(path, start = 0, length = Infinity, now = false) {
         const key = '/game/' + path, size = sizes.get(key);
         if (!size || packedFiles.has(key) || start >= size) return;
         const first = Math.floor(start / chunkSize);
@@ -168,7 +168,15 @@ addToLibrary({
         remaining -= bytes;
         const url = new URL(aliases.get(key) || 'game/' + path, self.location.href);
         const info = resource(key, url, size, chunkSize, true);
-        jobs.push(() => ensure(info, first, last));
+        if (now) ensure(info, first, last).catch(() => { /* a demand read retries */ });
+        else jobs.push(() => ensure(info, first, last));
+      }
+      // Start-up reads these one after another, each a blocking round trip (0.5 s each from far
+      // away; StaticR.rel alone cost 2.3 s as five serial chunks). Request them all at once.
+      for (const path of ['rel/StaticR.rel', 'Boot/Strap/eu/English.szs', 'contents/HomeButton.arc',
+                          'contents/HomeButtonSe.arc', 'hbm/homeBtn_ENG.szs', 'hbm/HomeButtonSe.arc',
+                          'contents/RFLRes01.arc', 'Scene/Model/MiiBody.szs', 'Scene/Model/Earth.szs']) {
+        queue('DATA/files/' + path, 0, Infinity, true);
       }
       // These menus are reached directly after choosing a licence. Warm their data while
       // startup prepares graphics, using two background requests and at most 128 MiB total.
@@ -177,6 +185,10 @@ addToLibrary({
                           'Scene/Model/Driver.szs', 'Scene/Model/Kart/pc-allkart.szs',
                           'Scene/UI/MenuMulti.szs', 'Scene/UI/MenuOther.szs']) queue('DATA/files/' + path);
       queue('DATA/files/sound/strm/o_Start2_32_fan.brstm');
+      // Read in turn after a licence is chosen: the title video's start, the course-intro and
+      // race-start fanfares, and the kart-select model of whichever character is picked.
+      queue('DATA/files/thp/title/title.thp', 0, 2 * 1024 * 1024);
+      for (const name of ['o_Crs_In_Fan', 'o_Start32_fan']) queue('DATA/files/sound/strm/' + name + '.brstm');
       const firstVideos = ['DATA/files/thp/title/top_menu.thp', 'DATA/files/thp/button/single_top.thp'];
       for (const path of firstVideos) {
         if (aliases.has('/game/' + path)) queue(path, 0, 2 * 1024 * 1024);
@@ -192,6 +204,9 @@ addToLibrary({
       // race-load banks, and at the start the effect banks at 45-78 MiB, where which blocks are
       // touched varies with the characters and karts, so the region is warmed whole).
       for (const path of ['Race/Common.szs', 'Scene/UI/Race.szs', 'Scene/UI/Race_E.szs']) queue('DATA/files/' + path);
+      for (const key of [...sizes.keys()].sort()) {
+        if (/^\/game\/DATA\/files\/Scene\/Model\/Kart\/[^/]+-allkart\.szs$/.test(key)) queue(key.slice(6));
+      }
       for (const [from, to] of [[19, 22], [25, 27], [45, 78]]) {
         queue('DATA/files/sound/revo_kart.brsar', from * 1024 * 1024, (to - from) * 1024 * 1024);
       }
@@ -365,6 +380,7 @@ addToLibrary({
       // time stalls the game again at every chunk boundary. Chunks are released as they arrive,
       // so a whole-file request does not delay the first read.
       if ((/\.szs$/i.test(info.url.pathname) && info.size <= 16 * 1024 * 1024) ||
+          (/\.(rel|arc)$/i.test(info.url.pathname) && info.size <= 8 * 1024 * 1024) ||
           (/\.brstm$/i.test(info.url.pathname) && info.size <= 32 * 1024 * 1024)) {
         missingFirst = 0;
         missingLast = Math.ceil(info.size / info.chunkSize) - 1;
