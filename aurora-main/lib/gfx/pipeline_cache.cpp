@@ -87,6 +87,9 @@ static absl::flat_hash_map<PipelineRef, CachedPipeline> g_pipelines;
 static std::deque<PendingPipeline> g_priorityPipelines;
 static std::deque<PendingPipeline> g_backgroundPipelines;
 static absl::flat_hash_set<PipelineRef> g_pendingPipelines;
+#ifdef __EMSCRIPTEN__
+static uint32_t g_webOnDemandLogged = 0;
+#endif
 
 static sqlite3* g_pipelineCacheDb = nullptr;
 static sqlite3_stmt* g_pipelineCacheLoadStmt = nullptr;
@@ -538,7 +541,17 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
   }
 
   if (syncCreate) {
+#ifdef __EMSCRIPTEN__
+    const auto createStart = std::chrono::steady_clock::now();
+#endif
     const auto pipeline = cb();
+#ifdef __EMSCRIPTEN__
+    // A pipeline a draw needs that prewarm did not finish: the game thread waits for it. "?log" only.
+    if (const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - createStart).count();
+        ms >= 2.0 && g_webOnDemandLogged++ < 300) {
+      Log.info("On-demand pipeline {:x} took {:.1f} ms (frame {})", static_cast<uint64_t>(hash), ms, firstFrameUsed);
+    }
+#endif
     {
       std::scoped_lock guard{g_pipelineMutex};
       removedPending = remove_pending_pipeline(g_priorityPipelines, hash);

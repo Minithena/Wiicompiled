@@ -17,9 +17,12 @@
 #include "recomp_mod_loader.h"
 #include "runtime_config.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 #include <emscripten/em_asm.h>
 #include <emscripten/heap.h>
@@ -208,6 +211,35 @@ void StartWatchdog() {
                 WebPerformance::Report(now - previousReport);
                 previousReport = now;
             }
+        }
+    }).detach();
+
+    if (!WebPerformance::Enabled()) return;
+    // "?log" only: a statistical profile at guest-function granularity. The translated code
+    // publishes the target of each indirect call (RecompMod::ScopedTranslatedExecutionAddress), so
+    // sampling it shows which virtual calls the game thread is inside of; direct calls are not seen.
+    std::thread([translatedAddress] {
+        std::unordered_map<uint32_t, uint32_t> counts;
+        uint32_t total = 0;
+        auto reportAt = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::microseconds(300));
+            const uint32_t sample = *reinterpret_cast<const volatile uint32_t*>(translatedAddress);
+            ++counts[sample];
+            ++total;
+            if (std::chrono::steady_clock::now() < reportAt) continue;
+            std::vector<std::pair<uint32_t, uint32_t>> top(counts.begin(), counts.end());
+            std::sort(top.begin(), top.end(), [](auto& a, auto& b) { return a.second > b.second; });
+            std::string line = "[web-prof] samples=" + std::to_string(total);
+            for (size_t i = 0; i < top.size() && i < 14; ++i) {
+                char item[40];
+                std::snprintf(item, sizeof(item), " %08x:%.1f%%", top[i].first, 100.0 * top[i].second / total);
+                line += item;
+            }
+            std::printf("%s\n", line.c_str());
+            counts.clear();
+            total = 0;
+            reportAt = std::chrono::steady_clock::now() + std::chrono::seconds(6);
         }
     }).detach();
 }

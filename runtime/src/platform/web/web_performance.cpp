@@ -46,6 +46,13 @@ void RecordFrame(double interval, double guest, double drain, double copy, doubl
     if (interval > 25.0) over25.fetch_add(1, std::memory_order_relaxed);
     if (interval > 50.0) over50.fetch_add(1, std::memory_order_relaxed);
     if (interval > 100.0) over100.fetch_add(1, std::memory_order_relaxed);
+    // Each long frame on its own line, in order with the other [web] / aurora log lines, so a spike
+    // can be matched with what the game or renderer was doing just before it.
+    static std::atomic<uint32_t> slowLogged{0};
+    if (interval > 40.0 && slowLogged.fetch_add(1, std::memory_order_relaxed) < 400) {
+        std::printf("[web-perf] slow frame %.1f ms: guest %.1f copy %.1f wait %.1f overlay %.1f present %.1f\n",
+                    interval, guest, copy, wait, overlay, present);
+    }
 }
 
 void RecordDiscRead(double elapsed) noexcept {
