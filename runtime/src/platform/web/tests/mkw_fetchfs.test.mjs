@@ -570,3 +570,72 @@ test('a music stream is fetched whole in one request instead of a chunk at a tim
   assert.equal(stream.length, 1);
   assert.equal(stream[0].options.headers.Range, 'bytes=0-' + (5 * mb - 1));
 });
+
+test('opening a course stream also fetches its final-lap stream, whatever the letter case', async () => {
+  const mb = 1024 * 1024;
+  const { backend, requests } = setup({
+    manifestText: manifest + 'f ' + 3 * mb + ' DATA/files/sound/strm/n_Circuit32_n.brstm\n' +
+      'f ' + 2 * mb + ' DATA/files/sound/strm/n_Circuit32_f.brstm\n' +
+      'f ' + 2 * mb + ' DATA/files/sound/strm/n_Other32_f.brstm\n', chunkSize: mb,
+    fileUrls: { 2: 'DATA/files/sound/strm/n_Circuit32_n.brstm' },
+    beforeFetch: async (url, options) => {
+      if (!url.endsWith('.brstm')) return;
+      const [from, to] = options.headers.Range.slice(6).split('-').map(Number);
+      return new Response(new Uint8Array(to - from + 1), { status: 206 });
+    },
+  });
+  assert.equal(await backend.read(2, 10, 16, 0), 16);
+  for (let attempt = 0; attempt < 100 && requests.filter((r) => r.url.endsWith('.brstm')).length < 2; attempt++) await tick();
+  const streams = requests.filter((request) => request.url.endsWith('.brstm'));
+  assert.deepEqual(streams.map((request) => request.url.split('/').pop()).sort(),
+                   ['n_Circuit32_f.brstm', 'n_Circuit32_n.brstm']);
+  assert.equal(streams.find((r) => r.url.endsWith('_f.brstm')).options.headers.Range, 'bytes=0-' + (2 * mb - 1));
+});
+
+test('a course read fetches the next Grand Prix course in the background', async () => {
+  const mb = 1024 * 1024;
+  const { backend, requests } = setup({
+    manifestText: manifest + 'f ' + 2 * mb + ' DATA/files/Race/Course/beginner_course.szs\n' +
+      'f ' + 3 * mb + ' DATA/files/Race/Course/farm_course.szs\n' +
+      'f ' + 3 * mb + ' DATA/files/Race/Course/kinoko_course.szs\n', chunkSize: mb,
+    fileUrls: { 2: 'DATA/files/Race/Course/beginner_course.szs' },
+    beforeFetch: async (url, options) => {
+      if (!url.endsWith('.szs')) return;
+      const [from, to] = options.headers.Range.slice(6).split('-').map(Number);
+      return new Response(new Uint8Array(to - from + 1), { status: 206 });
+    },
+  });
+  assert.equal(await backend.read(2, 10, 16, 0), 16);
+  for (let attempt = 0; attempt < 100 && requests.filter((r) => r.url.endsWith('.szs')).length < 2; attempt++) await tick();
+  const archives = requests.filter((request) => request.url.endsWith('.szs')).map((request) => request.url.split('/').pop());
+  assert.deepEqual(archives.sort(), ['beginner_course.szs', 'farm_course.szs']);
+});
+
+test('a music stream over 8 MiB is still fetched whole', async () => {
+  const mb = 1024 * 1024;
+  const { backend, requests } = setup({
+    manifestText: manifest + 'f ' + 21 * mb + ' DATA/files/sound/strm/big.brstm\n', chunkSize: mb,
+    fileUrls: { 2: 'DATA/files/sound/strm/big.brstm' },
+    beforeFetch: async (url, options) => {
+      if (!url.endsWith('.brstm')) return;
+      const [from, to] = options.headers.Range.slice(6).split('-').map(Number);
+      return new Response(new Uint8Array(to - from + 1), { status: 206 });
+    },
+  });
+  assert.equal(await backend.read(2, 10, 16, 15 * mb), 16);
+  const stream = requests.filter((request) => request.url.endsWith('.brstm'));
+  assert.equal(stream.length, 1);
+  assert.equal(stream[0].options.headers.Range, 'bytes=0-' + (21 * mb - 1));
+});
+
+test('looking up a course or stream size alone does not prefetch its related files', async () => {
+  const mb = 1024 * 1024;
+  const { backend, requests } = setup({
+    manifestText: manifest + 'f ' + 2 * mb + ' DATA/files/Race/Course/beginner_course.szs\n' +
+      'f ' + 3 * mb + ' DATA/files/Race/Course/farm_course.szs\n', chunkSize: mb,
+    fileUrls: { 2: 'DATA/files/Race/Course/beginner_course.szs' },
+  });
+  assert.equal(await backend.getSize(2), 2 * mb);
+  for (let attempt = 0; attempt < 20; attempt++) await tick();
+  assert.equal(requests.filter((request) => request.url.endsWith('.szs')).length, 0);
+});

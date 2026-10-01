@@ -210,6 +210,53 @@ addToLibrary({
       void run();
     }
 
+    // Grand Prix order of the courses (a race loads the next one about 7 s after it starts).
+    const NEXT_COURSE = new Map();
+    for (const cup of [
+      ['beginner_course', 'farm_course', 'kinoko_course', 'factory_course'],
+      ['castle_course', 'shopping_course', 'boardcross_course', 'truck_course'],
+      ['senior_course', 'water_course', 'treehouse_course', 'volcano_course'],
+      ['desert_course', 'ridgehighway_course', 'koopa_course', 'rainbow_course'],
+      ['old_peach_gc', 'old_falls_ds', 'old_obake_sfc', 'old_mario_64'],
+      ['old_sherbet_64', 'old_heyho_gba', 'old_town_ds', 'old_waluigi_gc'],
+      ['old_desert_ds', 'old_koopa_gba', 'old_donkey_64', 'old_mario_gc'],
+      ['old_mario_sfc', 'old_garden_ds', 'old_donkey_gc', 'old_koopa_64'],
+    ]) {
+      for (let i = 0; i + 1 < cup.length; i++) NEXT_COURSE.set(cup[i], cup[i + 1]);
+    }
+    const relatedStarted = new Set();
+    let lowerKeys = null;
+    let knownSizes = null;
+
+    // A race reads a few files long after it starts, and every miss is a blocking round trip
+    // (0.4-0.5 s from far away): the course's final-lap music (the "_f" stream replaces the "_n"
+    // one when the last lap starts, and is 2-17 MiB) and the next Grand Prix course. Both are
+    // known the moment the first file opens, so fetch them in the background then.
+    function warmRelated(key, sizes, chunkSize) {
+      if (relatedStarted.has(key)) return;
+      relatedStarted.add(key);
+      const related = [];
+      const music = /^(\/game\/DATA\/files\/sound\/strm\/.+)_n\.brstm$/i.exec(key);
+      if (music) related.push((music[1] + '_f.brstm').toLowerCase());
+      const course = /^(\/game\/DATA\/files\/Race\/Course\/)([^/]+?)(?:_d)?\.szs$/.exec(key);
+      if (course && NEXT_COURSE.has(course[2])) related.push((course[1] + NEXT_COURSE.get(course[2]) + '.szs').toLowerCase());
+      if (!related.length) return;
+      if (!lowerKeys) {
+        lowerKeys = new Map();
+        for (const known of sizes.keys()) lowerKeys.set(known.toLowerCase(), known);
+      }
+      for (const lower of related) {
+        const target = lowerKeys.get(lower);
+        const size = target && sizes.get(target);
+        if (!size || packedFiles.has(target) || relatedStarted.has(target)) continue;
+        relatedStarted.add(target);
+        console.error('[web-fetch] prefetching ' + target + ' (after ' + key + ')');
+        const url = new URL(aliases.get(target) || target.slice(1), self.location.href);
+        const info = resource(target, url, size, chunkSize, true);
+        ensure(info, 0, Math.ceil(size / chunkSize) - 1).catch(() => { /* a demand read retries */ });
+      }
+    }
+
     async function describe(file, generation) {
       if (fileState(file).generation !== generation) throw new Error('File closed during operation');
       let info = files.get(file);
@@ -254,6 +301,7 @@ addToLibrary({
         }
       }
       warmMenus(sizes, chunkSize);
+      knownSizes = sizes;
       return info;
     }
 
@@ -313,10 +361,11 @@ addToLibrary({
       }
       // Yaz0 archives are consumed whole immediately after their header is read. One bounded
       // fetch avoids serial round trips for the header and subsequent compressed data. Music
-      // streams (a few MiB each) are read through to the end, and fetching them a chunk at a
-      // time stalls the game again at every chunk boundary.
+      // streams (2-21 MiB each) are read through to the end, and fetching them a chunk at a
+      // time stalls the game again at every chunk boundary. Chunks are released as they arrive,
+      // so a whole-file request does not delay the first read.
       if ((/\.szs$/i.test(info.url.pathname) && info.size <= 16 * 1024 * 1024) ||
-          (/\.brstm$/i.test(info.url.pathname) && info.size <= 8 * 1024 * 1024)) {
+          (/\.brstm$/i.test(info.url.pathname) && info.size <= 32 * 1024 * 1024)) {
         missingFirst = 0;
         missingLast = Math.ceil(info.size / info.chunkSize) - 1;
       }
@@ -441,6 +490,7 @@ addToLibrary({
           }
           length = Math.min(length, info.size - offset);
           if (length <= 0) return 0;
+          if (knownSizes) warmRelated(info.key, knownSizes, info.chunkSize);
           const first = Math.floor(offset / info.chunkSize);
           const last = Math.floor((offset + length - 1) / info.chunkSize);
           await waitForFile(file, generation, ensure(info, first, last));

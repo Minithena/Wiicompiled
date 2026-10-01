@@ -913,7 +913,15 @@ extern "C" int32_t DVDReadPrio_8015E834(uint32_t fileInfoPtr, uint32_t bufferPtr
                             DvdReadContract::Describe(failure));
     }
 #ifdef __EMSCRIPTEN__
-    if (readStarted != 0.0) WebPerformance::RecordDiscRead(WebPerformance::Now() - readStarted);
+    if (readStarted != 0.0) {
+        const double readMs = WebPerformance::Now() - readStarted;
+        WebPerformance::RecordDiscRead(readMs);
+        // A disc read blocks the whole game, so a slow one is a hitch: name the file ("?log" only).
+        if (readMs >= 30.0) {
+            std::printf("[web-disc] read took %.0f ms: %s +%u (%u bytes)\n", readMs,
+                        HostPathText(entry.hostPath).c_str(), uOffset, uLength);
+        }
+    }
 #endif
 
     CopyToGuestAsDma(bufferPtr, tempBuf.data(), uLength);
