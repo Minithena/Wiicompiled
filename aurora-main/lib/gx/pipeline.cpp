@@ -60,6 +60,14 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
   return build_pipeline(config, {}, shader, "GX Pipeline");
 }
 
+#ifdef __EMSCRIPTEN__
+void create_pipeline_async(const PipelineConfig& config, std::function<void(wgpu::RenderPipeline)> done) {
+  ZoneScoped;
+  const auto shader = cached_shader_module(config.shaderConfig);
+  build_pipeline_async(config, {}, shader, "GX Pipeline", std::move(done));
+}
+#endif
+
 void clear_shader_module_cache() {
   std::lock_guard lock{sShaderModuleCacheMutex};
   sShaderModuleCache.clear();

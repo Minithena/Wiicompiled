@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include "../gfx/common.hpp"
 #include "shader_info.hpp"
 
@@ -62,6 +64,9 @@ inline bool valid_pipeline_config(const PipelineConfig& config) noexcept {
 }
 
 wgpu::RenderPipeline create_pipeline([[maybe_unused]] const PipelineConfig& config);
+#ifdef __EMSCRIPTEN__
+void create_pipeline_async(const PipelineConfig& config, std::function<void(wgpu::RenderPipeline)> done);
+#endif
 void clear_shader_module_cache();
 
 // Per-pass encoder state carried across the draws of one render pass, so the replay loop can elide Dawn calls that would re-bind what is already bound.

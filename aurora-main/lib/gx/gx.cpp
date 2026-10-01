@@ -1609,9 +1609,11 @@ static inline wgpu::PrimitiveState to_primitive_state(GXCullMode gx_cullMode) {
   };
 }
 
-wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
-                                    wgpu::ShaderModule shader, const char* label) noexcept {
-  ZoneScoped;
+// The descriptor points at locals, so it is built here and handed to a callback that creates the pipeline
+// (synchronously, or through the browser's asynchronous API).
+template <typename Fn>
+static auto with_pipeline_descriptor(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
+                                     wgpu::ShaderModule shader, const char* label, Fn&& create) {
   const wgpu::DepthStencilState depthStencil{
       .format = g_graphicsConfig.depthFormat,
       .depthWriteEnabled = config.depthUpdate,
@@ -1648,8 +1650,40 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
           },
       .fragment = &fragmentState,
   };
-  return g_device.CreateRenderPipeline(&descriptor);
+  return create(descriptor);
 }
+
+wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
+                                    wgpu::ShaderModule shader, const char* label) noexcept {
+  ZoneScoped;
+  return with_pipeline_descriptor(config, vtxBuffers, shader, label, [](const wgpu::RenderPipelineDescriptor& descriptor) {
+    return g_device.CreateRenderPipeline(&descriptor);
+  });
+}
+
+#ifdef __EMSCRIPTEN__
+// Browser pipelines compile on the GPU process's worker threads when created asynchronously, so a cold
+// start's many pipelines overlap instead of each blocking the render thread. The callback fires on the
+// render thread (from the browser event loop) with an empty pipeline if creation failed.
+void build_pipeline_async(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
+                          wgpu::ShaderModule shader, const char* label,
+                          std::function<void(wgpu::RenderPipeline)> done) noexcept {
+  ZoneScoped;
+  with_pipeline_descriptor(config, vtxBuffers, shader, label, [&](const wgpu::RenderPipelineDescriptor& descriptor) {
+    g_device.CreateRenderPipelineAsync(
+        &descriptor, wgpu::CallbackMode::AllowSpontaneous,
+        [done = std::move(done)](wgpu::CreatePipelineAsyncStatus status, wgpu::RenderPipeline pipeline,
+                                 wgpu::StringView message) {
+          if (status != wgpu::CreatePipelineAsyncStatus::Success) {
+            Log.warn("Asynchronous pipeline creation failed: status {} {}", static_cast<int>(status),
+                     std::string_view{message.data, message.length});
+          }
+          done(std::move(pipeline));
+        });
+    return 0;
+  });
+}
+#endif
 
 u8 comp_type_size(GXAttr attr, GXCompType type) noexcept {
   switch (attr) {

@@ -1,4 +1,6 @@
 #pragma once
+
+#include <functional>
 #include <dolphin/gx.h>
 #include <aurora/math.hpp>
 
@@ -767,6 +769,11 @@ struct BindGroupRanges {
 void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept;
 wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
                                     wgpu::ShaderModule shader, const char* label) noexcept;
+#ifdef __EMSCRIPTEN__
+void build_pipeline_async(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
+                          wgpu::ShaderModule shader, const char* label,
+                          std::function<void(wgpu::RenderPipeline)> done) noexcept;
+#endif
 wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept;
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept;
 void notify_copy_texture_created() noexcept;

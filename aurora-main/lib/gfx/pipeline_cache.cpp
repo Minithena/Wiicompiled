@@ -40,10 +40,14 @@ struct CachedPipeline {
   uint32_t firstFrameUsed = UINT32_MAX;
 };
 
+using NewPipelineAsyncCallback = std::function<void(std::function<void(wgpu::RenderPipeline)>)>;
+
 struct PendingPipeline {
   PipelineRef hash;
   uint32_t firstFrameUsed = UINT32_MAX;
   NewPipelineCallback create;
+  // Web only: starts an asynchronous creation (GX pipelines), see build_synchronous_pipelines_for_frame.
+  NewPipelineAsyncCallback createAsync;
 };
 
 struct PipelineCacheWrite {
@@ -473,6 +477,13 @@ static bool remove_pending_pipeline(Queue& queue, PipelineRef hash) {
   return true;
 }
 
+#ifdef __EMSCRIPTEN__
+static NewPipelineAsyncCallback make_async_creator(const gx::PipelineConfig& config) {
+  return [config](std::function<void(wgpu::RenderPipeline)> done) { gx::create_pipeline_async(config, std::move(done)); };
+}
+static NewPipelineAsyncCallback make_async_creator(const clear::PipelineConfig&) { return {}; }
+#endif
+
 template <typename PipelineConfig>
 static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& config, NewPipelineCallback&& cb,
                                       bool persist, std::optional<uint32_t> firstFrameUsedOverride) {
@@ -528,6 +539,9 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
               .hash = hash,
               .firstFrameUsed = firstFrameUsed,
               .create = std::move(cb),
+#ifdef __EMSCRIPTEN__
+              .createAsync = make_async_creator(config),
+#endif
           });
           g_pendingPipelines.insert(hash);
           ++queuedPipelines;
@@ -1024,15 +1038,14 @@ static void note_pipeline_queue_drained() {
 #endif
 }
 
-static void compile_pending_pipeline(PendingPipeline pending) {
-  auto result = pending.create();
+static void finish_compiled_pipeline(PipelineRef hash, uint32_t firstFrameUsed, wgpu::RenderPipeline result) {
   {
     std::lock_guard lock{g_pipelineMutex};
-    const auto [_, inserted] = g_pipelines.try_emplace(pending.hash, CachedPipeline{
-                                                                         .pipeline = std::move(result),
-                                                                         .firstFrameUsed = pending.firstFrameUsed,
-                                                                     });
-    g_pendingPipelines.erase(pending.hash);
+    const auto [_, inserted] = g_pipelines.try_emplace(hash, CachedPipeline{
+                                                                 .pipeline = std::move(result),
+                                                                 .firstFrameUsed = firstFrameUsed,
+                                                             });
+    g_pendingPipelines.erase(hash);
     if (inserted) {
       ++createdPipelines;
     }
@@ -1042,6 +1055,11 @@ static void compile_pending_pipeline(PendingPipeline pending) {
   if (queuedPipelines.load() == 0) {
     note_pipeline_queue_drained();
   }
+}
+
+static void compile_pending_pipeline(PendingPipeline pending) {
+  auto result = pending.create();
+  finish_compiled_pipeline(pending.hash, pending.firstFrameUsed, std::move(result));
 }
 
 static void pipeline_worker() {
@@ -1093,6 +1111,25 @@ constexpr double WebMaxPrewarmMs = 6.0;
 constexpr uint32_t WebMaxDeferredFrames = 4;
 static std::chrono::steady_clock::time_point g_pipelineFrameStart = std::chrono::steady_clock::now();
 static uint32_t g_deferredPrewarmFrames = 0;
+// GX pipelines are created asynchronously, a few dozen at a time: a cold browser compiles each in about
+// 50 ms, and one blocking create per frame made first-visit boot take over a minute. The GPU process
+// compiles the in-flight ones on its worker threads; each finishes in its callback on the render thread.
+constexpr uint32_t WebMaxAsyncInFlight = 24;
+static std::atomic<uint32_t> g_asyncInFlight{0};
+
+static void start_async_pipeline(PendingPipeline pending) {
+  ++g_asyncInFlight;
+  const PipelineRef hash = pending.hash;
+  const uint32_t firstFrameUsed = pending.firstFrameUsed;
+  NewPipelineCallback create = std::move(pending.create);
+  pending.createAsync([hash, firstFrameUsed, create = std::move(create)](wgpu::RenderPipeline pipeline) {
+    --g_asyncInFlight;
+    if (!pipeline) {
+      pipeline = create(); // creation failed: fall back to the blocking path
+    }
+    finish_compiled_pipeline(hash, firstFrameUsed, std::move(pipeline));
+  });
+}
 
 static void build_synchronous_pipelines_for_frame() {
   using Clock = std::chrono::steady_clock;
@@ -1120,10 +1157,17 @@ static void build_synchronous_pipelines_for_frame() {
         return;
       }
       auto& source = !g_priorityPipelines.empty() ? g_priorityPipelines : g_backgroundPipelines;
+      if (source.front().createAsync && g_asyncInFlight.load() >= WebMaxAsyncInFlight) {
+        break; // enough compiles in flight; their callbacks free slots
+      }
       pending = std::move(source.front());
       source.pop_front();
     }
-    compile_pending_pipeline(std::move(pending));
+    if (pending.createAsync) {
+      start_async_pipeline(std::move(pending));
+    } else {
+      compile_pending_pipeline(std::move(pending));
+    }
     ++g_prewarmBuilt;
   } while (Clock::now() < deadline);
   const double batchMs = std::chrono::duration<double, std::milli>(Clock::now() - now).count();
