@@ -110,7 +110,8 @@
       </div>
       <div id="room-invite" hidden>
         <label for="room-name">Your name</label>
-        <input id="room-name" placeholder="Choose a display name" maxlength="24" autocomplete="off" spellcheck="false">
+        <input id="room-name" placeholder="Choose a display name" maxlength="24" autocomplete="off" spellcheck="false" aria-describedby="room-name-hint">
+        <p id="room-name-hint" class="note">Also your name in the game (first 10 characters). Set it before you press Play.</p>
         <label for="invite-link">Invite link</label>
         <input id="invite-link" readonly aria-label="Invite link">
         <div class="room-actions">

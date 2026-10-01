@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <initializer_list>
+#include <vector>
 #include <emscripten/em_asm.h>
 #include <emscripten/emscripten.h>
 
@@ -127,6 +128,96 @@ struct ServiceScope {
     ~ServiceScope() { inServiceCall = false; }
 };
 
+// The lobby name typed on the page, as the up to ten UTF-16 units a Mii name holds. Characters
+// outside the BMP and control characters are dropped.
+std::vector<uint16_t> LobbyNameUnits() {
+    char text[129]{};
+    MAIN_THREAD_EM_ASM({ stringToUTF8(window.mkwRoomName || '', $0, $1); }, text, sizeof(text));
+    std::vector<uint16_t> units;
+    const auto* p = reinterpret_cast<const uint8_t*>(text);
+    while (*p && units.size() < 10) {
+        uint32_t cp = *p++, extra = 0;
+        if (cp >= 0xf0) { cp &= 0x07; extra = 3; }
+        else if (cp >= 0xe0) { cp &= 0x0f; extra = 2; }
+        else if (cp >= 0xc0) { cp &= 0x1f; extra = 1; }
+        for (; extra && (*p & 0xc0) == 0x80; --extra) cp = (cp << 6) | (*p++ & 0x3f);
+        if (cp >= 0x20 && cp != 0x7f && cp <= 0xffff && !(cp >= 0xd800 && cp < 0xe000)) {
+            units.push_back(static_cast<uint16_t>(cp));
+        }
+    }
+    return units;
+}
+
+// Built-in default Miis are labelled "Player" by every name printer (Mii::Load flags a Mii whose
+// ID is in the default table, and MiiNameMsgPrinter prints the literal for flagged Miis), and this
+// build has no Mii database, so a profile's Mii is always a default one. Real Miis come from the
+// RFL database (records of 74 bytes at *(state + 16) + 4, ID at +0x18) and are searched first, so
+// put a copy of the profile's default record, under the lobby name, into that in-memory database.
+// The ID stays the same, so the saved profile is unchanged and still resolves to the default Mii
+// when no database record exists. Nothing here is written to the NAND.
+void AddDatabaseMii(CpuContext* cpu, uint32_t createId, const std::vector<uint16_t>& name) {
+    constexpr uint32_t kDefaultTable = 0x8024c4d0, kRecord = 74, kDefaults = 6, kSlots = 100;
+    const uint32_t state = Memory::Read32(cpu->gpr[13] - 26984);
+    if (!state || !Memory::Contains(state, 0x1b40)) {
+        std::printf("[room-launch] Mii database: RFL state not found\n");
+        return;
+    }
+    const uint32_t database = Memory::Read32(state + 16);
+    if (!Memory::Contains(database, 4 + kSlots * kRecord)) {
+        std::printf("[room-launch] Mii database: not available (%08x), flags %02x\n", database,
+                    Memory::Read8(state + 6972));
+        return;
+    }
+    uint8_t id[8];
+    for (uint32_t i = 0; i < 8; ++i) id[i] = Memory::Read8(createId + i);
+    uint32_t source = 0;
+    for (uint32_t i = 0; i < kDefaults && !source; ++i) {
+        const uint32_t record = kDefaultTable + i * kRecord;
+        bool same = true;
+        for (uint32_t k = 0; k < 8 && same; ++k) same = Memory::Read8(record + 0x18 + k) == id[k];
+        if (same) source = record;
+    }
+    if (!source) {
+        std::printf("[room-launch] Mii database: profile Mii is not a default Mii\n");
+        return;
+    }
+    // RFLiGetCharData refuses every database read while either of the low two bits of the flags
+    // byte at +6972 is set (database missing or in need of repair, which is how it starts here
+    // without a Mii file). The database is only held in memory, so mark it usable.
+    const uint8_t flags = Memory::Read8(state + 6972);
+    if (flags & 3) Memory::Write8(state + 6972, flags & ~3);
+    // First slot the game does not already consider filled.
+    uint32_t slot = kSlots;
+    unsigned filled = 0;
+    for (uint32_t i = 0; i < kSlots; ++i) {
+        if (Call(cpu, 0x800c6af0, {i})) ++filled; else if (slot == kSlots) slot = i;
+    }
+    std::printf("[room-launch] Mii database at %08x flags %02x->%02x: %u of %u slots filled, first free %u\n", database,
+                flags, Memory::Read8(state + 6972), filled, kSlots, slot);
+    if (slot == kSlots) return;
+    const uint32_t target = database + 4 + slot * kRecord;
+    for (uint32_t i = 0; i < kRecord; ++i) Memory::Write8(target + i, Memory::Read8(source + i));
+    for (uint32_t i = 0; i < 10; ++i) {
+        const uint16_t unit = i < name.size() ? name[i] : 0;
+        Memory::Write8(target + 2 + i * 2, static_cast<uint8_t>(unit >> 8));
+        Memory::Write8(target + 3 + i * 2, static_cast<uint8_t>(unit));
+    }
+    const bool accepted = Call(cpu, 0x800c6af0, {slot}) != 0;
+    std::printf("[room-launch] Mii database slot %u written; game now sees it as %s\n", slot,
+                accepted ? "filled" : "EMPTY");
+    if (!accepted) return;
+    // A Mii received from another player is rebuilt from its store data as a default-source Mii,
+    // and Mii::Load flags it (so every name printer shows "Player" and a generic face) whenever
+    // its ID is in the default table. This profile's ID is a default one, so every received Mii
+    // would match. The local profile now resolves through the database (searched first), so
+    // switch the default table's IDs off, in memory only, for the rest of this session.
+    for (uint32_t i = 0; i < kDefaults; ++i) {
+        const uint32_t idByte = kDefaultTable + i * kRecord + 0x18;
+        Memory::Write8(idByte, Memory::Read8(idByte) ^ 0x40);
+    }
+    std::printf("[room-launch] default Mii table disabled for this session\n");
+}
+
 void PrepareBoot(CpuContext* cpu) {
     const uint32_t manager = Object(kSectionManagerSlot, 0x9c);
     const uint32_t save = Object(kSaveManagerSlot, 0x25008);
@@ -166,6 +257,9 @@ void PrepareBoot(CpuContext* cpu) {
     if (!Memory::Contains(createId, 8)) {
         Manual("Choose a Mii for your game profile, then reopen the invite.");
         return;
+    }
+    if (const std::vector<uint16_t> lobbyName = LobbyNameUnits(); !lobbyName.empty()) {
+        AddDatabaseMii(cpu, createId, lobbyName);
     }
     Call(cpu, 0x805fa6e0, {params + 0x238, 0, createId});
     if (!Call(cpu, 0x805fa930, {params + 0x238, 0})) {

@@ -157,7 +157,7 @@ addToLibrary({
       if (warmingStarted) return;
       warmingStarted = true;
       const jobs = [];
-      let remaining = 64 * 1024 * 1024;
+      let remaining = 128 * 1024 * 1024;
       function queue(path, start = 0, length = Infinity) {
         const key = '/game/' + path, size = sizes.get(key);
         if (!size || packedFiles.has(key) || start >= size) return;
@@ -171,7 +171,7 @@ addToLibrary({
         jobs.push(() => ensure(info, first, last));
       }
       // These menus are reached directly after choosing a licence. Warm their data while
-      // startup prepares graphics, using two background requests and at most 64 MiB total.
+      // startup prepares graphics, using two background requests and at most 128 MiB total.
       for (const path of ['Scene/UI/Title.szs', 'Scene/UI/Title_E.szs', 'Scene/UI/MenuSingle.szs',
                           'Scene/UI/Font.szs', 'Scene/Model/BackModel.szs',
                           'Scene/Model/Driver.szs', 'Scene/Model/Kart/pc-allkart.szs',
@@ -185,6 +185,15 @@ addToLibrary({
       // waiting for its entire 100+ MiB body or issuing separate reads for each sound bank.
       for (const megabyte of [0, 8, 12, 4]) {
         queue('DATA/files/sound/revo_kart.brsar', megabyte * 1024 * 1024, 4 * 1024 * 1024);
+      }
+      // A race reads these as soon as it loads or starts, and every miss is a blocking round
+      // trip (0.4-0.5 s from far away): the shared race and HUD archives, plus the sound-archive
+      // blocks a race fetches (found by logging the ranges of Luigi Circuit Grand Prix runs: the
+      // race-load banks, and at the start the effect banks at 45-78 MiB, where which blocks are
+      // touched varies with the characters and karts, so the region is warmed whole).
+      for (const path of ['Race/Common.szs', 'Scene/UI/Race.szs', 'Scene/UI/Race_E.szs']) queue('DATA/files/' + path);
+      for (const [from, to] of [[19, 22], [25, 27], [45, 78]]) {
+        queue('DATA/files/sound/revo_kart.brsar', from * 1024 * 1024, (to - from) * 1024 * 1024);
       }
       const remainingVideos = [...aliases.keys()].filter(key => key.startsWith('/game/DATA/files/thp/') &&
           !firstVideos.includes(key.slice(6)));
@@ -303,8 +312,11 @@ addToLibrary({
         return;
       }
       // Yaz0 archives are consumed whole immediately after their header is read. One bounded
-      // fetch avoids serial round trips for the header and subsequent compressed data.
-      if (/\.szs$/i.test(info.url.pathname) && info.size <= 16 * 1024 * 1024) {
+      // fetch avoids serial round trips for the header and subsequent compressed data. Music
+      // streams (a few MiB each) are read through to the end, and fetching them a chunk at a
+      // time stalls the game again at every chunk boundary.
+      if ((/\.szs$/i.test(info.url.pathname) && info.size <= 16 * 1024 * 1024) ||
+          (/\.brstm$/i.test(info.url.pathname) && info.size <= 8 * 1024 * 1024)) {
         missingFirst = 0;
         missingLast = Math.ceil(info.size / info.chunkSize) - 1;
       }

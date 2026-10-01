@@ -499,9 +499,9 @@ test('file handles share cached resources until their final reference is freed',
   assert.equal(requests.length, 3);
 });
 
-test('video warmups fetch only the start of each clip, with a 64 MiB budget and two concurrent jobs', async () => {
+test('video warmups fetch only the start of each clip, with a 128 MiB budget and two concurrent jobs', async () => {
   const mb = 1024 * 1024, rows = [];
-  for (let index = 0; index < 40; index++) {
+  for (let index = 0; index < 80; index++) {
     const path = 'DATA/files/thp/course/test' + index + '.thp';
     const target = 'web-videos/' + index.toString(16).padStart(64, '0') + '.thp';
     rows.push('f ' + 20 * mb + ' ' + path, 'u ' + JSON.stringify([path, target]));
@@ -520,8 +520,53 @@ test('video warmups fetch only the start of each clip, with a 64 MiB budget and 
     },
   });
   assert.ok(await backend.getSize(1) > 0);
-  for (let attempt = 0; attempt < 100 && (requests.length < 33 || active); attempt++) await tick();
+  for (let attempt = 0; attempt < 100 && (requests.length < 65 || active); attempt++) await tick();
   await tick();
   assert.equal(peak, 2);
-  assert.equal(requests.length, 33); // manifest plus 32 two-MiB prefixes
+  assert.equal(requests.length, 65); // manifest plus 64 two-MiB prefixes
+});
+
+test('startup warms the shared race archives and the sound blocks a race fetches at its start', async () => {
+  const mb = 1024 * 1024;
+  const files = [['Race/Common.szs', mb], ['Scene/UI/Race.szs', mb], ['Scene/UI/Race_E.szs', mb / 4],
+                 ['sound/revo_kart.brsar', 107 * mb]];
+  const rows = files.map(([path, size]) => 'f ' + size + ' DATA/files/' + path);
+  const { backend, requests } = setup({
+    manifestText: manifest + rows.join('\n') + '\n', chunkSize: mb,
+    beforeFetch: async (url, options) => {
+      if (url.endsWith('.szs') || url.endsWith('.brsar')) {
+        const [from, to] = options.headers.Range.slice(6).split('-').map(Number);
+        return new Response(new Uint8Array(to - from + 1), { status: 206 });
+      }
+    },
+  });
+  assert.ok(await backend.getSize(1) > 0);
+  for (let attempt = 0; attempt < 200 && requests.length < 1 + 3 + 3 + 4; attempt++) await tick();
+  await tick();
+  const fetched = requests.filter((request) => request.url.endsWith('.brsar'))
+    .map((request) => request.options.headers.Range);
+  // The four menu-sound ranges, then the race ranges (MiB 19-22, 25-27 and the whole 45-78 region).
+  for (const [from, to] of [[19, 22], [25, 27], [45, 78]]) {
+    assert.ok(fetched.includes('bytes=' + from * mb + '-' + (to * mb - 1)), 'range ' + from + '-' + to);
+  }
+  for (const name of ['Race/Common.szs', 'Scene/UI/Race.szs', 'Scene/UI/Race_E.szs']) {
+    assert.ok(requests.some((request) => request.url.endsWith(name)), name);
+  }
+});
+
+test('a music stream is fetched whole in one request instead of a chunk at a time', async () => {
+  const mb = 1024 * 1024;
+  const { backend, requests } = setup({
+    manifestText: manifest + 'f ' + 5 * mb + ' DATA/files/sound/strm/test.brstm\n', chunkSize: mb,
+    fileUrls: { 2: 'DATA/files/sound/strm/test.brstm' },
+    beforeFetch: async (url, options) => {
+      if (!url.endsWith('.brstm')) return;
+      const [from, to] = options.headers.Range.slice(6).split('-').map(Number);
+      return new Response(new Uint8Array(to - from + 1), { status: 206 });
+    },
+  });
+  assert.equal(await backend.read(2, 10, 16, 3 * mb + 5), 16);
+  const stream = requests.filter((request) => request.url.endsWith('.brstm'));
+  assert.equal(stream.length, 1);
+  assert.equal(stream[0].options.headers.Range, 'bytes=0-' + (5 * mb - 1));
 });
