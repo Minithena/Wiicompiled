@@ -18,7 +18,8 @@ function deferred() {
 }
 
 function setup({ invalidManifest = false, ignoreRange = false, aliases = '', manifestText = manifest,
-                 fileUrls = { 2: 'DATA/files/test.bin' }, contents = {}, beforeFetch = async () => {} } = {}) {
+                 fileUrls = { 2: 'DATA/files/test.bin' }, contents = {}, chunkSize = 4,
+                 beforeFetch = async () => {} } = {}) {
   const requests = [], errors = [], backends = {}, heap = new Uint8Array(4096);
   let library;
   vm.runInNewContext(source, {
@@ -26,7 +27,7 @@ function setup({ invalidManifest = false, ignoreRange = false, aliases = '', man
     wasmFS$backends: backends, HEAPU8: heap,
     UTF8ToString: (s) => s,
     __wasmfs_fetch_get_file_url: (file) => file === 1 ? 'game//manifest.txt' : 'game//' + fileUrls[file],
-    __wasmfs_fetch_get_chunk_size: () => 4,
+    __wasmfs_fetch_get_chunk_size: () => chunkSize,
     self: { location: { href: 'https://game.test/WiiCompiled.js' } },
     URL, TextDecoder, crypto: webcrypto,
     console: { error: (...args) => errors.push(args.join(' ')) },
@@ -232,4 +233,82 @@ test('an in-flight read cannot restore data after its file is freed', async () =
   assert.ok(heap.every((byte) => byte === 0));
   assert.equal(await backend.read(2, 0, 4, 0), 4);
   assert.equal(requests.length, 3);
+});
+
+test('menu warmups stay in the background, use two requests, and satisfy demand without duplicates', async () => {
+  const gate = deferred();
+  const paths = ['DATA/files/Scene/UI/Title.szs', 'DATA/files/Scene/UI/Title_E.szs', 'DATA/files/Scene/UI/MenuSingle.szs'];
+  const { backend, requests, heap } = setup({
+    manifestText: manifest + paths.map(path => 'f 12 ' + path + '\n').join(''),
+    fileUrls: { 2: paths[0], 3: paths[1], 4: paths[2] },
+    beforeFetch: async url => { if (url.endsWith('.szs')) await gate.promise; },
+  });
+  assert.ok(await backend.getSize(1) > 0);
+  await tick();
+  assert.equal(requests.length, 3); // one manifest, two pending warmups
+  const demand = backend.read(2, 0, 6, 2);
+  await tick();
+  assert.equal(requests.length, 3);
+  gate.resolve();
+  assert.equal(await demand, 6);
+  assert.equal(new TextDecoder().decode(heap.slice(0, 6)), 'cdefgh');
+  await tick();
+  assert.equal(requests.length, 4);
+  assert.equal(await backend.read(4, 20, 4, 8), 4);
+  await backend.freeFile(2);
+  assert.equal(await backend.read(2, 40, 4, 0), 4);
+  assert.equal(requests.length, 4);
+});
+
+test('failed optional menu warmups do not block startup and can retry on demand', async () => {
+  const path = 'DATA/files/Scene/UI/Title.szs';
+  let attempts = 0;
+  const { backend, heap } = setup({
+    manifestText: manifest + 'f 12 ' + path + '\n', fileUrls: { 2: path },
+    beforeFetch: async url => { if (url.endsWith('.szs') && ++attempts === 1) return new Response(null, { status: 503 }); },
+  });
+  assert.ok(await backend.getSize(1) > 0);
+  await tick();
+  assert.equal(await backend.read(2, 0, 4, 0), 4);
+  assert.equal(attempts, 2);
+  assert.equal(new TextDecoder().decode(heap.slice(0, 4)), 'abcd');
+});
+
+test('file handles share cached resources until their final reference is freed', async () => {
+  const { backend, requests } = setup({ fileUrls: { 2: 'DATA/files/test.bin', 3: 'DATA/files/test.bin' } });
+  assert.deepEqual(await Promise.all([backend.read(2, 0, 4, 0), backend.read(3, 20, 4, 0)]), [4, 4]);
+  assert.equal(requests.length, 2);
+  await backend.freeFile(2);
+  assert.equal(await backend.read(3, 40, 4, 0), 4);
+  assert.equal(requests.length, 2);
+  await backend.freeFile(3);
+  assert.equal(await backend.read(2, 60, 4, 0), 4);
+  assert.equal(requests.length, 3);
+});
+
+test('video warmups fetch only the start of each clip, with a 64 MiB budget and two concurrent jobs', async () => {
+  const mb = 1024 * 1024, rows = [];
+  for (let index = 0; index < 40; index++) {
+    const path = 'DATA/files/thp/course/test' + index + '.thp';
+    const target = 'web-videos/' + index.toString(16).padStart(64, '0') + '.thp';
+    rows.push('f ' + 20 * mb + ' ' + path, 'u ' + JSON.stringify([path, target]));
+  }
+  let active = 0, peak = 0;
+  const { backend, requests } = setup({
+    manifestText: manifest + rows.join('\n') + '\n', chunkSize: mb,
+    beforeFetch: async (url, options) => {
+      if (!url.endsWith('.thp')) return;
+      active++;
+      peak = Math.max(peak, active);
+      await tick();
+      active--;
+      assert.equal(options.headers.Range, 'bytes=0-2097151');
+      return new Response(new Uint8Array(2 * mb), { status: 206 });
+    },
+  });
+  assert.ok(await backend.getSize(1) > 0);
+  for (let attempt = 0; attempt < 100 && (requests.length < 33 || active); attempt++) await tick();
+  await tick();
+  assert.equal(peak, 2);
+  assert.equal(requests.length, 33); // manifest plus 32 two-MiB prefixes
 });
