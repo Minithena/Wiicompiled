@@ -435,8 +435,12 @@
       overlay.hidden = false;
       startButton.hidden = true;
       startButton.disabled = true;
-      document.getElementById('reload').hidden = false;
-      statusEl.textContent = 'The game stopped: ' + what + ' (details in the browser console).';
+      // A browser known to lack a requirement fails inside the runtime too; say why, once, and do
+      // not offer a Reload that cannot help.
+      document.getElementById('reload').hidden = missing.length > 0;
+      statusEl.textContent = missing.length
+        ? 'This browser is missing: ' + missing.join(', ') + '.'
+        : 'The game stopped: ' + what + ' (details in the browser console).';
     },
   };
 
