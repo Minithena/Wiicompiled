@@ -223,11 +223,12 @@ void StartWatchdog() {
     std::thread([translatedAddress] {
         std::unordered_map<uint32_t, uint32_t> counts;
         uint32_t total = 0;
-        auto reportAt = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+        auto reportAt = std::chrono::steady_clock::now() + std::chrono::seconds(1);
         for (;;) {
             std::this_thread::sleep_for(std::chrono::microseconds(300));
             const uint32_t sample = *reinterpret_cast<const volatile uint32_t*>(translatedAddress);
             ++counts[sample];
+            WebPerformance::PushSample(WebPerformance::Now(), sample);
             ++total;
             if (std::chrono::steady_clock::now() < reportAt) continue;
             std::vector<std::pair<uint32_t, uint32_t>> top(counts.begin(), counts.end());
@@ -241,7 +242,7 @@ void StartWatchdog() {
             std::printf("%s\n", line.c_str());
             counts.clear();
             total = 0;
-            reportAt = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+            reportAt = std::chrono::steady_clock::now() + std::chrono::seconds(1);
         }
     }).detach();
 }

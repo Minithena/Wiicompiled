@@ -9,6 +9,10 @@ void RecordFrame(double interval, double guest, double drain, double copy, doubl
 void RecordPresentParts(double endFrame, double pace, double post) noexcept;
 void RecordDiscRead(double elapsed) noexcept;
 void RecordSleep(double elapsed) noexcept;
+// Guest-function sampler support: samples are pushed from a helper thread; a slow frame reports
+// what was sampled during it.
+void PushSample(double now, unsigned address) noexcept;
+void ReportSlowFrameSamples(double frameStart, double frameEnd) noexcept;
 void Report(double elapsed) noexcept;
 } // namespace WebPerformance
 #endif

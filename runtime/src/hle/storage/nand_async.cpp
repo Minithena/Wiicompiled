@@ -328,6 +328,7 @@ bool IsHostPathOpen(const std::filesystem::path& hostPath) {
 // dropped and the original is left exactly as it was, and the error is returned so the
 // guest's close call fails instead of silently reporting success.
 int32_t CommitAndCloseFd(const char* who, int32_t fd, bool missingFdIsError) {
+    NandSlowTimer slowTimer("CommitAndCloseFd");
     std::filesystem::path tempPath;
     std::filesystem::path commitPath;
     FILE* file = nullptr;
@@ -355,7 +356,7 @@ int32_t CommitAndCloseFd(const char* who, int32_t fd, bool missingFdIsError) {
 
     // Only writable handles get the fsync: _commit/FlushFileBuffers fails on a handle that
     // was opened read-only.
-    const bool flushed = writable ? FlushFileToDisk(file) : true;
+    const bool flushed = [&] { NandSlowTimer flushTimer("CommitAndCloseFd flush"); return writable ? FlushFileToDisk(file) : true; }();
     if (file) {
         std::fclose(file);
     }
@@ -375,6 +376,7 @@ int32_t CommitAndCloseFd(const char* who, int32_t fd, bool missingFdIsError) {
         return NAND_RESULT_UNKNOWN;
     }
 
+    NandSlowTimer replaceTimer("CommitAndCloseFd atomic replace");
     if (!AtomicReplaceHostFile(who, tempPath, commitPath)) {
         NandRemove(tempPath);
         return NAND_RESULT_UNKNOWN;
@@ -385,6 +387,7 @@ int32_t CommitAndCloseFd(const char* who, int32_t fd, bool missingFdIsError) {
 
 extern "C" int32_t NANDSafeOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t mode,
                                      uint32_t tempBufferPtr, uint32_t tempBufferSize) {
+    NandSlowTimer slowTimer("NANDSafeOpen");
     (void)tempBufferPtr;
     (void)tempBufferSize;
 

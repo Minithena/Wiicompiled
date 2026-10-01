@@ -2,6 +2,7 @@
 //
 // Shared state and helpers live in nand_internal.h.
 
+#include <vector>
 #include "nand_internal.h"
 
 #include <atomic>
@@ -118,7 +119,36 @@ extern "C" int32_t NANDCheck_HLE(uint32_t blockSize, uint32_t blockCount, uint32
 }
 PPC_NATIVE_OVERRIDE(8019EAD0, NANDCheck_HLE, int32_t, (uint32_t blockSize, uint32_t blockCount, uint32_t outResults), (blockSize, blockCount, outResults));
 
+#ifdef __EMSCRIPTEN__
+// std::filesystem::copy_file on browser storage (OPFS) moves a file in small chunks, and each one is
+// a cross-thread call into the storage backend: the 2.8 MB save took ~330 ms to shadow, twice per
+// race start. Large reads and writes go through as a handful of calls.
+static bool CopyFileInLargeChunks(const std::filesystem::path& from, const std::filesystem::path& to,
+                                  std::error_code& ec) {
+    ec.clear();
+    FILE* in = NandFopen(from, "rb");
+    if (!in) { ec = std::make_error_code(std::errc::no_such_file_or_directory); return false; }
+    FILE* out = NandFopen(to, "wb");
+    if (!out) { std::fclose(in); ec = std::make_error_code(std::errc::io_error); return false; }
+    std::setvbuf(in, nullptr, _IONBF, 0);
+    std::setvbuf(out, nullptr, _IONBF, 0);
+    static constexpr size_t kChunk = 1u << 20;
+    std::vector<char> buffer(kChunk);
+    bool ok = true;
+    for (;;) {
+        const size_t got = std::fread(buffer.data(), 1, buffer.size(), in);
+        if (got > 0 && std::fwrite(buffer.data(), 1, got, out) != got) { ok = false; break; }
+        if (got < buffer.size()) { ok = !std::ferror(in); break; }
+    }
+    std::fclose(in);
+    if (std::fclose(out) != 0) ok = false;
+    if (!ok) ec = std::make_error_code(std::errc::io_error);
+    return ok;
+}
+#endif
+
 extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t mode) {
+    NandSlowTimer slowTimer("NANDOpen");
     const char* path = pathPtr ? (const char*)Memory::GetPointer(pathPtr) : nullptr;
     if (!path || !fileInfoPtr) {
         LogNandError("NANDOpen", "invalid params: path=%p fileInfo=0x%08X", path, fileInfoPtr);
@@ -143,8 +173,13 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
             const std::filesystem::path tempPath = SafeTempPathFor(hostPath);
             if (DiscardStaleSafeTemp(tempPath)) {
                 std::error_code ec;
+                NandSlowTimer copyTimer("NANDOpen shadow copy");
+#ifdef __EMSCRIPTEN__
+                CopyFileInLargeChunks(hostPath, tempPath, ec);
+#else
                 std::filesystem::copy_file(hostPath, tempPath,
                                            std::filesystem::copy_options::overwrite_existing, ec);
+#endif
                 if (ec) {
                     LogNandWarning("NANDOpen", "WARNING: could not seed shadow '%s' (%s), writing in place",
                                    HostPathText(tempPath).c_str(), ec.message().c_str());

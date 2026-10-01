@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <emscripten/emscripten.h>
 
 extern "C" void aurora_web_frame_timings(double*, double*, double*, double*, double*);
@@ -14,6 +15,11 @@ extern "C" void aurora_web_map_stats(double*, double*);
 
 namespace WebPerformance {
 namespace {
+struct Sample { double time; uint32_t address; };
+constexpr size_t kSampleRing = 16384;
+std::array<Sample, kSampleRing> sampleRing;
+std::atomic<uint32_t> sampleHead{0};
+
 struct Timing {
     std::atomic<uint32_t> total{0};
     std::atomic<uint32_t> peak{0};
@@ -54,6 +60,10 @@ void RecordFrame(double interval, double guest, double drain, double copy, doubl
     // Each long frame on its own line, in order with the other [web] / aurora log lines, so a spike
     // can be matched with what the game or renderer was doing just before it.
     static std::atomic<uint32_t> slowLogged{0};
+    if (interval > 150.0) {
+        const double endTime = Now();
+        ReportSlowFrameSamples(endTime - interval, endTime);
+    }
     if (interval > 40.0 && slowLogged.fetch_add(1, std::memory_order_relaxed) < 400) {
         std::printf("[web-perf] slow frame %.1f ms: guest %.1f copy %.1f wait %.1f overlay %.1f present %.1f\n",
                     interval, guest, copy, wait, overlay, present);
@@ -67,6 +77,38 @@ void RecordPresentParts(double endFrame, double pace, double post) noexcept {
 }
 
 void RecordSleep(double elapsed) noexcept { sleeps.Add(elapsed); }
+
+void PushSample(double now, unsigned address) noexcept {
+    const uint32_t index = sampleHead.load(std::memory_order_relaxed);
+    sampleRing[index % kSampleRing] = {now, address};
+    sampleHead.store(index + 1, std::memory_order_release);
+}
+
+void ReportSlowFrameSamples(double frameStart, double frameEnd) noexcept {
+    const uint32_t head = sampleHead.load(std::memory_order_acquire);
+    std::array<std::pair<uint32_t, uint32_t>, 4096> bins{};  // address, count
+    size_t used = 0;
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < kSampleRing && i < head; ++i) {
+        const Sample sample = sampleRing[(head - 1 - i) % kSampleRing];
+        if (sample.time < frameStart) break;
+        if (sample.time > frameEnd) continue;
+        ++total;
+        size_t b = 0;
+        while (b < used && bins[b].first != sample.address) ++b;
+        if (b == used && used < bins.size()) bins[used++] = {sample.address, 0};
+        if (b < used) ++bins[b].second;
+    }
+    if (!total) return;
+    std::sort(bins.begin(), bins.begin() + used, [](auto& a, auto& b) { return a.second > b.second; });
+    std::string line = "[web-prof] slow frame " + std::to_string(static_cast<int>(frameEnd - frameStart)) + " ms samples=" + std::to_string(total);
+    for (size_t i = 0; i < used && i < 8; ++i) {
+        char item[40];
+        std::snprintf(item, sizeof(item), " %08x:%.0f%%", bins[i].first, 100.0 * bins[i].second / total);
+        line += item;
+    }
+    std::printf("%s\n", line.c_str());
+}
 
 void RecordDiscRead(double elapsed) noexcept {
     disc.Add(elapsed);

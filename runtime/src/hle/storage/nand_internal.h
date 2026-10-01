@@ -39,6 +39,24 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#ifdef __EMSCRIPTEN__
+#include <chrono>
+#include <cstdio>
+// Logs a NAND operation that takes over 20 ms (browser storage is slow, and these block the guest).
+struct NandSlowTimer {
+    const char* what;
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    explicit NandSlowTimer(const char* name) : what(name) {}
+    ~NandSlowTimer() {
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        if (ms >= 20.0) std::printf("[web-nand] %s took %.0f ms\n", what, ms);
+    }
+};
+#else
+struct NandSlowTimer { explicit NandSlowTimer(const char*) {} };
+#endif
+
 #endif
 
 // Mario Kart Wii Title ID
