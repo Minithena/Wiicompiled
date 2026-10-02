@@ -57,6 +57,14 @@ bool Enabled() noexcept {
     return enabled;
 }
 
+bool ProfilerEnabled() noexcept {
+    static const bool enabled = [] {
+        const char* value = std::getenv("MKW_WEB_PROFILE");
+        return Enabled() && value && *value == '1';
+    }();
+    return enabled;
+}
+
 double Now() noexcept { return emscripten_get_now(); }
 
 bool BenchmarkEnabled() noexcept {

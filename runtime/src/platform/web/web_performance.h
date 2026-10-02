@@ -2,7 +2,11 @@
 
 #if defined(__EMSCRIPTEN__)
 namespace WebPerformance {
+// Frame/disc/pacing statistics and the 3 s summary lines (MKW_WEB_PERF=1; the page sets it for
+// every player so a saved log always has them). Cheap: a few clock reads per frame.
 bool Enabled() noexcept;
+// The guest-function sampling profiler thread ("?log" only: MKW_WEB_PROFILE=1).
+bool ProfilerEnabled() noexcept;
 double Now() noexcept;
 void RecordFrame(double interval, double guest, double drain, double copy, double wait,
                  double overlay, double present) noexcept;

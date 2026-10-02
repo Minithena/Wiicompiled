@@ -219,7 +219,7 @@ void StartWatchdog() {
         }
     }).detach();
 
-    if (!WebPerformance::Enabled()) return;
+    if (!WebPerformance::ProfilerEnabled()) return;
 #if MKW_WEB_GUEST_PROFILE
     // Diagnostic build only (web_guest_profile.h): innermost guest function and inclusive counts
     // from the per-thread guest call stacks, every 3 s.

@@ -182,5 +182,5 @@ test('benchmark hooks cover nocatchup and leave statistical profiling opt-in', a
   const hooks = await readFile(new URL('../web_guest_hooks.cpp', import.meta.url), 'utf8');
   assert.ok(hooks.indexOf('RecordBenchmarkStep()') < hooks.indexOf('if (!s_catchup) return false;'));
   const platform = await readFile(new URL('../web_platform.cpp', import.meta.url), 'utf8');
-  assert.ok(platform.includes('if (!WebPerformance::Enabled()) return;'));
+  assert.ok(platform.includes('if (!WebPerformance::ProfilerEnabled()) return;'));
 });

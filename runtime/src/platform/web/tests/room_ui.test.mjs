@@ -94,7 +94,7 @@ function setupRoomPage(search = '?room=abcdef', navigatorOverride = { gpu: worki
     'invite-link', 'join-room', 'create-room', 'copy-invite', 'leave-room', 'status', 'start',
     'reload', 'overlay', 'controls', 'show-controls', 'hide-controls', 'canvas', 'volume',
     'volume-value', 'toggle-mute', 'keyboard-off', 'binding-help', 'room-code',
-    'hint', 'diag', 'diag-text', 'diag-copy', 'game-runtime', 'save-status',
+    'hint', 'diag', 'diag-text', 'diag-copy', 'game-runtime', 'save-status', 'save-log', 'diag-save-log',
   ];
   const elements = new Map(ids.map((id) => [id, new Element(id)]));
   elements.get('start').disabled = true;
@@ -702,4 +702,21 @@ test('running out of memory while loading explains itself and keeps the details'
   assert.match(elements.get('hint').textContent, /ran out of memory while loading/);
   assert.equal(elements.get('hint').hidden, false);
   assert.match(elements.get('diag-text').textContent, /Stopped with: InternalError: out of memory/);
+});
+
+test('Save log text has the page details and console output, without the room code', () => {
+  const quietConsole = { log() {}, info() {}, warn() {}, error() {} };
+  const { context } = setupRoomPage('?room=abcdef123456&log', { gpu: workingGpu, userAgent: 'test-agent' }, {
+    console: quietConsole, innerWidth: 800, innerHeight: 600, screen: { width: 1920, height: 1080 }, devicePixelRatio: 2,
+  });
+  context.Module.print('[web-perf] fps=59.9 room abcdef123456');
+  context.Module.printErr('something failed');
+  const text = vm.runInContext('buildLogText(60)', context);
+  assert.match(text, /^WiiCompiled log saved /);
+  assert.match(text, /User agent: test-agent/);
+  assert.match(text, /Display refresh: ~60\.0 Hz/);
+  assert.match(text, /Window: 800x600, screen 1920x1080, pixel ratio 2/);
+  assert.match(text, /s log \[web-perf\] fps=59\.9 room \(room\)/);
+  assert.match(text, /s error something failed/);
+  assert.equal(text.includes('abcdef123456'), false);
 });

@@ -47,6 +47,7 @@
   #volume { width: 100%; margin: 10px 0 0; accent-color: var(--accent); }
   #volume-value { color: var(--muted); font-variant-numeric: tabular-nums; }
   .note { color: var(--muted); font-size: 12px; margin: 18px 0 0; }
+  #save-log-help { margin: 0 0 8px; }
   #room-panel { border-bottom: 1px solid var(--line); padding-bottom: 16px; margin-bottom: 16px; }
   #room-panel h2 { margin-bottom: 10px; }
   #room-roster { padding: 0; margin: 8px 0; list-style: none; }
@@ -109,6 +110,7 @@
         <summary>Technical details</summary>
         <pre id="diag-text"></pre>
         <button type="button" id="diag-copy" class="link">Copy</button>
+        <button type="button" id="diag-save-log" class="link">Save log</button>
       </details>
     </div>
   </div>
@@ -180,10 +182,53 @@
     <p class="note" id="keyboard-off" hidden>The keyboard is turned off for player 1: turn it on in
       <kbd>F10</kbd> → Controller settings.</p>
     <p class="note">A game controller works too. On a Mac keyboard, press <kbd>fn</kbd>+<kbd>F10</kbd>.</p>
+    <h3>Problems</h3>
+    <p class="note" id="save-log-help">Low FPS, stutter, a crash or a disconnect? Press Save log straight after it
+      happens and send the file with a few words about what you saw.</p>
+    <button type="button" id="save-log" class="link">Save log</button>
   </aside>
 </div>
 <script>
   const params = new URLSearchParams(location.search);
+
+  // Every page keeps a copy of its console output, the game's own output included, so a player
+  // can press "Save log" and send it in. The start-up lines are kept, then a rolling window of
+  // the most recent ones (a few lines every 3 s while playing: about an hour).
+  const pageLog = (() => {
+    const started = Date.now();
+    const head = [], tail = [];
+    const kHeadLines = 400, kTailLines = 8000, kTailChars = 3000000;
+    let tailChars = 0, dropped = 0;
+    const listeners = [];
+    const text = (value) => {
+      if (value instanceof Error) return value.stack || String(value);
+      if (typeof value === 'string') return value;
+      try { return JSON.stringify(value) ?? String(value); } catch { return String(value); }
+    };
+    const add = (level, args) => {
+      const message = level + ' ' + args.map(text).join(' ');
+      for (const listener of listeners) listener(message);
+      const line = ((Date.now() - started) / 1000).toFixed(1).padStart(8) + 's ' + message;
+      if (head.length < kHeadLines) { head.push(line); return; }
+      tail.push(line);
+      tailChars += line.length;
+      while (tail.length > kTailLines || tailChars > kTailChars) {
+        tailChars -= tail.shift().length;
+        dropped++;
+      }
+    };
+    for (const level of ['log', 'info', 'warn', 'error']) {
+      const original = console[level].bind(console);
+      console[level] = (...args) => { add(level, args); original(...args); };
+    }
+    addEventListener('error', (e) => add('uncaught', [e.message + ' @ ' + e.filename + ':' + e.lineno]));
+    addEventListener('unhandledrejection', (e) => add('unhandled', [e.reason]));
+    return {
+      started,
+      listen: (listener) => listeners.push(listener),
+      lines: () => dropped ? [...head, `... ${dropped} older lines dropped ...`, ...tail] : [...head, ...tail],
+    };
+  })();
 
   // Online room (tools/cloudflare/rooms): "?room=<code>" from an invite link, or a full ws:// URL
   // for a room server run locally with `wrangler dev`.
@@ -400,16 +445,7 @@
   // for debugging browsers whose developer tools are not at hand.
   if (params.has('log')) {
     let pending = [];
-    const forward = (level, args) => {
-      pending.push(level + ' ' + args.map((a) => a instanceof Error ? a.stack || String(a)
-                                                     : typeof a === 'string' ? a : JSON.stringify(a)).join(' '));
-    };
-    for (const level of ['log', 'warn', 'error']) {
-      const original = console[level].bind(console);
-      console[level] = (...args) => { forward(level, args); original(...args); };
-    }
-    addEventListener('error', (e) => forward('uncaught', [e.message + ' @ ' + e.filename + ':' + e.lineno]));
-    addEventListener('unhandledrejection', (e) => forward('unhandled', [e.reason]));
+    pageLog.listen((message) => pending.push(message));
     setInterval(() => {
       if (!pending.length) return;
       const body = pending.join('\n');
@@ -507,6 +543,69 @@
       button.textContent = 'Select the technical details above and copy them';
     }
   });
+  // "Save log": the page's diagnostics and its captured console output as a text file to send in.
+  const measureRefreshRate = () => new Promise((resolve) => {
+    if (typeof requestAnimationFrame !== 'function') { resolve(null); return; }
+    const times = [];
+    const timeout = setTimeout(() => resolve(null), 1500);
+    const tick = (time) => {
+      times.push(time);
+      if (times.length < 31) { requestAnimationFrame(tick); return; }
+      clearTimeout(timeout);
+      const gaps = times.slice(1).map((t, i) => t - times[i]).sort((a, b) => a - b);
+      resolve(1000 / gaps[gaps.length >> 1]);
+    };
+    requestAnimationFrame(tick);
+  });
+  const buildLogText = (refreshHz) => {
+    const page = new URL(location.href);
+    if (page.searchParams.has('room')) page.searchParams.set('room', '(set)');
+    const lines = [
+      'WiiCompiled log saved ' + new Date().toISOString(),
+      'Page: ' + page.origin + page.pathname + page.search,
+      'Open for: ' + Math.round((Date.now() - pageLog.started) / 1000) + ' s',
+      'Game started: ' + gameStarted + (runtimeFailed ? ', stopped' : '') + (roomUrl ? ', in a room' : ''),
+      'Status: ' + (statusEl.textContent || '(none)'),
+      'Window: ' + innerWidth + 'x' + innerHeight + ', screen ' + screen.width + 'x' + screen.height
+        + ', pixel ratio ' + devicePixelRatio,
+      'Display refresh: ' + (refreshHz ? '~' + refreshHz.toFixed(1) + ' Hz' : 'unknown'),
+      ...diag,
+      '',
+      '--- console ---',
+      ...pageLog.lines(),
+    ];
+    let text = lines.join('\n') + '\n';
+    if (roomParam) text = text.split(roomParam).join('(room)');
+    return text;
+  };
+  const saveLog = async (button) => {
+    const label = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Saving…';
+    try {
+      const text = buildLogText(await measureRefreshRate());
+      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+      const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'wiicompiled-log-' + stamp + '.txt';
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      button.textContent = 'Saved: send the file';
+    } catch (error) {
+      console.error('Save log failed: ' + error);
+      button.textContent = 'Could not save the log';
+    }
+    button.disabled = false;
+    setTimeout(() => { button.textContent = label; }, 4000);
+    if (gameStarted && !runtimeFailed) Module.canvas.focus();
+  };
+  for (const id of ['save-log', 'diag-save-log']) {
+    const button = document.getElementById(id);
+    button.addEventListener('click', () => saveLog(button));
+  }
   const graphicsProbe = (async () => {
     if (!hasWebGPU) return;
     let adapter = null;
@@ -573,7 +672,10 @@
       if (roomUrl) ENV.MKW_WEB_ROOM = roomUrl;
       if (directRoomJoin) ENV.MKW_WEB_DIRECT_JOIN = '1';
       if (params.has('netlog')) ENV.MKW_WEB_NETLOG = '1';
-      if (params.has('log')) ENV.MKW_WEB_PERF = '1';
+      // Frame timing summaries every 3 s for every player, so "Save log" always has them; the
+      // sampling profiler is a separate thread and stays behind "?log".
+      ENV.MKW_WEB_PERF = '1';
+      if (params.has('log')) ENV.MKW_WEB_PROFILE = '1';
       if (window.mkwBenchmarkConfig) ENV.MKW_WEB_BENCHMARK_CONFIG = JSON.stringify(window.mkwBenchmarkConfig);
       if (['autodrive-v1', 'ghost-v1'].includes(window.mkwBenchmarkConfig?.input_recipe)) ENV.MKW_WEB_BENCHMARK_AUTODRIVE = '1';
       // Diagnostics: ?burn=<ms> adds that much CPU work to every frame; ?oldyield restores the
