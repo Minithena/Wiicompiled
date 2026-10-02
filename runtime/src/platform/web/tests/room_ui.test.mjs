@@ -94,7 +94,7 @@ function setupRoomPage(search = '?room=abcdef', navigatorOverride = { gpu: worki
     'invite-link', 'join-room', 'create-room', 'copy-invite', 'leave-room', 'status', 'start',
     'reload', 'overlay', 'controls', 'show-controls', 'hide-controls', 'canvas', 'volume',
     'volume-value', 'toggle-mute', 'keyboard-off', 'binding-help', 'room-code',
-    'hint', 'diag', 'diag-text', 'diag-copy', 'game-runtime', 'save-status', 'save-log', 'diag-save-log',
+    'hint', 'diag', 'diag-text', 'diag-copy', 'game-runtime', 'save-status', 'save-log', 'diag-save-log', 'detailed-log',
   ];
   const elements = new Map(ids.map((id) => [id, new Element(id)]));
   elements.get('start').disabled = true;
@@ -718,5 +718,24 @@ test('Save log text has the page details and console output, without the room co
   assert.match(text, /Window: 800x600, screen 1920x1080, pixel ratio 2/);
   assert.match(text, /s log \[web-perf\] fps=59\.9 room \(room\)/);
   assert.match(text, /s error something failed/);
+  assert.match(text, /Detailed logging: on/);
   assert.equal(text.includes('abcdef123456'), false);
+});
+
+test('Detailed logging is remembered and turns on the profiler without forwarding', () => {
+  const { context, elements, localValues } = setupRoomPage('', { gpu: workingGpu, userAgent: 'test' });
+  assert.equal(elements.get('detailed-log').checked, false);
+  const toggle = elements.get('detailed-log');
+  toggle.checked = true;
+  toggle.dispatch('change');
+  assert.equal(localValues.get('mkw-detailed-log'), '1');
+  const second = setupRoomPage('', { gpu: workingGpu, userAgent: 'test' }, {
+    localStorage: { getItem: (key) => key === 'mkw-detailed-log' ? '1' : null, setItem() {}, removeItem() {} },
+  });
+  assert.equal(second.elements.get('detailed-log').checked, true);
+  second.context.Module.preRun[0]();
+  assert.equal(second.context.ENV.MKW_WEB_PROFILE, '1');
+  assert.equal(second.context.ENV.MKW_WEB_PERF, '1');
+  context.Module.preRun[0]();
+  assert.equal(context.ENV.MKW_WEB_PROFILE, undefined);
 });

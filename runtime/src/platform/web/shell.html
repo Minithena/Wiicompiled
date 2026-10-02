@@ -48,6 +48,9 @@
   #volume-value { color: var(--muted); font-variant-numeric: tabular-nums; }
   .note { color: var(--muted); font-size: 12px; margin: 18px 0 0; }
   #save-log-help { margin: 0 0 8px; }
+  .log-toggle { display: flex; align-items: center; gap: 6px; margin-top: 12px; }
+  .log-toggle input { accent-color: var(--accent); margin: 0; }
+  #detailed-log-note { margin-top: 4px; }
   #room-panel { border-bottom: 1px solid var(--line); padding-bottom: 16px; margin-bottom: 16px; }
   #room-panel h2 { margin-bottom: 10px; }
   #room-roster { padding: 0; margin: 8px 0; list-style: none; }
@@ -184,8 +187,13 @@
     <p class="note">A game controller works too. On a Mac keyboard, press <kbd>fn</kbd>+<kbd>F10</kbd>.</p>
     <h3>Problems</h3>
     <p class="note" id="save-log-help">Low FPS, stutter, a crash or a disconnect? Press Save log straight after it
-      happens and send the file with a few words about what you saw.</p>
+      happens, then DM the file to <strong>hiemal</strong> on Discord with a few words about what you saw.</p>
     <button type="button" id="save-log" class="link">Save log</button>
+    <label class="log-toggle"><input type="checkbox" id="detailed-log"> Detailed logging</label>
+    <p class="note" id="detailed-log-note">Adds a CPU profile to the log so slowdowns can be traced back to the
+      game code. It runs an extra background thread: no difference on a fast computer, but it can cost a
+      little speed on one with few CPU cores, so turn it off once you have sent the log. Changing it
+      reloads the page.</p>
   </aside>
 </div>
 <script>
@@ -543,6 +551,26 @@
       button.textContent = 'Select the technical details above and copy them';
     }
   });
+  // "Detailed logging" (or "?log" in the address): also run the sampling profiler, whose lines
+  // ([web-prof]) name the game code a slow frame was in. Remembered in this browser until turned off.
+  const detailedLogToggle = document.getElementById('detailed-log');
+  let detailedLogSaved = false;
+  try { detailedLogSaved = localStorage.getItem('mkw-detailed-log') === '1'; } catch {}
+  const detailedLog = params.has('log') || detailedLogSaved;
+  detailedLogToggle.checked = detailedLog;
+  detailedLogToggle.addEventListener('change', () => {
+    const on = detailedLogToggle.checked;
+    if (gameStarted && !confirm((on ? 'Turn on' : 'Turn off') + ' detailed logging? The page reloads, so '
+        + 'anything not saved in the game is lost.')) {
+      detailedLogToggle.checked = !on;
+      return;
+    }
+    try { if (on) localStorage.setItem('mkw-detailed-log', '1'); else localStorage.removeItem('mkw-detailed-log'); } catch {}
+    const next = new URL(location.href);
+    if (!on) next.searchParams.delete('log');
+    location.href = next.href;
+  });
+
   // "Save log": the page's diagnostics and its captured console output as a text file to send in.
   const measureRefreshRate = () => new Promise((resolve) => {
     if (typeof requestAnimationFrame !== 'function') { resolve(null); return; }
@@ -569,6 +597,7 @@
       'Window: ' + innerWidth + 'x' + innerHeight + ', screen ' + screen.width + 'x' + screen.height
         + ', pixel ratio ' + devicePixelRatio,
       'Display refresh: ' + (refreshHz ? '~' + refreshHz.toFixed(1) + ' Hz' : 'unknown'),
+      'Detailed logging: ' + (detailedLog ? 'on' : 'off'),
       ...diag,
       '',
       '--- console ---',
@@ -673,9 +702,9 @@
       if (directRoomJoin) ENV.MKW_WEB_DIRECT_JOIN = '1';
       if (params.has('netlog')) ENV.MKW_WEB_NETLOG = '1';
       // Frame timing summaries every 3 s for every player, so "Save log" always has them; the
-      // sampling profiler is a separate thread and stays behind "?log".
+      // sampling profiler is a separate thread and stays behind "Detailed logging" / "?log".
       ENV.MKW_WEB_PERF = '1';
-      if (params.has('log')) ENV.MKW_WEB_PROFILE = '1';
+      if (detailedLog) ENV.MKW_WEB_PROFILE = '1';
       if (window.mkwBenchmarkConfig) ENV.MKW_WEB_BENCHMARK_CONFIG = JSON.stringify(window.mkwBenchmarkConfig);
       if (['autodrive-v1', 'ghost-v1'].includes(window.mkwBenchmarkConfig?.input_recipe)) ENV.MKW_WEB_BENCHMARK_AUTODRIVE = '1';
       // Diagnostics: ?burn=<ms> adds that much CPU work to every frame; ?oldyield restores the
