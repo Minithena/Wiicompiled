@@ -14,6 +14,7 @@
 
 extern "C" void aurora_web_frame_timings(double*, double*, double*, double*, double*);
 extern "C" void aurora_web_map_stats(double*, double*);
+extern "C" void aurora_web_staging_stats(double*);
 extern "C" void mkw_benchmark_init(const char*, const char*);
 extern "C" void mkw_benchmark_step(double, double, double, int, int, int, int, int, int);
 extern "C" void mkw_benchmark_online();
@@ -215,6 +216,10 @@ void Report(double elapsed) noexcept {
                 sealMs / count, encodeMs / count, waitMs / count, yieldMs / count, encodeMaxMs,
                 mapLatencyMs, mapWaitMs / count, sleepMs / count,
                 totals[0] / count - sleepMs / count - waitMs / count - mapWaitMs / count - yieldMs / count);
+    double staging[5];
+    aurora_web_staging_stats(staging);
+    std::printf("[web-perf] staging high water KiB vert/uniform/index/storage=%.0f/%.0f/%.0f/%.0f splits=%.0f\n",
+                staging[0] / 1024, staging[1] / 1024, staging[2] / 1024, staging[3] / 1024, staging[4]);
 }
 } // namespace WebPerformance
 #endif

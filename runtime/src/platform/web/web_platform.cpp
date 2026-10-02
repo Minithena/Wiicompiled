@@ -11,6 +11,7 @@
 
 #include "web_platform.h"
 #include "web_guest_hooks.h"
+#include "web_guest_profile.h"
 #include "web_performance.h"
 
 #include "fiber_manager.h"
@@ -219,6 +220,50 @@ void StartWatchdog() {
     }).detach();
 
     if (!WebPerformance::Enabled()) return;
+#if MKW_WEB_GUEST_PROFILE
+    // Diagnostic build only (web_guest_profile.h): innermost guest function and inclusive counts
+    // from the per-thread guest call stacks, every 3 s.
+    std::thread([] {
+        std::unordered_map<uint32_t, uint32_t> self, incl;
+        uint32_t total = 0;
+        auto reportAt = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        const auto top = [](const std::unordered_map<uint32_t, uint32_t>& counts, size_t n, uint32_t total) {
+            std::vector<std::pair<uint32_t, uint32_t>> v(counts.begin(), counts.end());
+            std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
+            std::string line;
+            for (size_t i = 0; i < v.size() && i < n; ++i) {
+                char item[48];
+                std::snprintf(item, sizeof(item), " %08x:%.1f%%", v[i].first, 100.0 * v[i].second / total);
+                line += item;
+            }
+            return line;
+        };
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::microseconds(250));
+            const WebGuestProfile::Stack* s = WebGuestProfile::g_current;
+            if (!s) continue;
+            uint32_t depth = s->depth;
+            if (depth > WebGuestProfile::kMaxDepth) depth = WebGuestProfile::kMaxDepth;
+            uint32_t frames[WebGuestProfile::kMaxDepth];
+            for (uint32_t i = 0; i < depth; ++i) frames[i] = s->addr[i];
+            ++total;
+            const uint32_t leaf = depth ? frames[depth - 1] : 0;
+            ++self[leaf];
+            std::vector<uint32_t> seen;
+            for (uint32_t i = 0; i < depth; ++i) {
+                if (std::find(seen.begin(), seen.end(), frames[i]) != seen.end()) continue;
+                seen.push_back(frames[i]);
+                ++incl[frames[i]];
+            }
+            if (std::chrono::steady_clock::now() < reportAt) continue;
+            std::printf("[web-gprof] self samples=%u%s\n", total, top(self, 24, total).c_str());
+            std::printf("[web-gprof] incl samples=%u%s\n", total, top(incl, 40, total).c_str());
+            self.clear(); incl.clear();
+            total = 0;
+            reportAt = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        }
+    }).detach();
+#endif
     // "?log" only: a statistical profile at guest-function granularity. The translated code
     // publishes the target of each indirect call (RecompMod::ScopedTranslatedExecutionAddress), so
     // sampling it shows which virtual calls the game thread is inside of; direct calls are not seen.

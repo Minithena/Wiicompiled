@@ -45,7 +45,24 @@ struct DebugFrameData {
 };
 DebugFrameData g_debugFrame;
 
-constexpr uint64_t StagingBufferSize = UniformBufferSize + VertexBufferSize + IndexBufferSize + StorageBufferSize +
+// Staging ring sizes. The GPU-side buffers keep the full sizes above either way.
+#ifdef __EMSCRIPTEN__
+// A browser copies a write-mapped buffer's whole mapped range when it is unmapped (into the GPU
+// process), whatever was written, so mapping 37 MiB of mostly empty rings cost a 37 MiB copy per
+// frame there. The web build maps rings about 3x the largest per-frame use measured in a 12-kart
+// Grand Prix (vertex 566 KiB, uniform 1.8 MiB, index 367 KiB, storage 836 KiB); a frame that needs
+// more splits its batch (split_staging_batch), as any capacity overflow does.
+constexpr uint64_t StagingVertexSize = 2 * 1024 * 1024;
+constexpr uint64_t StagingUniformSize = 6 * 1024 * 1024;
+constexpr uint64_t StagingIndexSize = 1024 * 1024;
+constexpr uint64_t StagingStorageSize = 3 * 1024 * 1024;
+#else
+constexpr uint64_t StagingVertexSize = VertexBufferSize;
+constexpr uint64_t StagingUniformSize = UniformBufferSize;
+constexpr uint64_t StagingIndexSize = IndexBufferSize;
+constexpr uint64_t StagingStorageSize = StorageBufferSize;
+#endif
+constexpr uint64_t StagingBufferSize = StagingUniformSize + StagingVertexSize + StagingIndexSize + StagingStorageSize +
                                        (UseTextureBuffer ? TextureUploadSize : 0);
 
 struct ShaderDrawCommand {
@@ -268,7 +285,7 @@ static ClipRect g_suspendedEfbScissor;
 // offscreen split, without rendering it before the bake it may sample finishes.
 static StagingSizes g_suspendedEfbBytes{};
 static constexpr StagingSizes PhysicalStagingCapacity{
-    VertexBufferSize, UniformBufferSize, IndexBufferSize, StorageBufferSize};
+    StagingVertexSize, StagingUniformSize, StagingIndexSize, StagingStorageSize};
 static StagingSizes g_stagingCapacity = PhysicalStagingCapacity;
 static uint64_t g_stagingEpoch = 0;
 static uint64_t g_stagingSplitCount = 0;
@@ -278,6 +295,16 @@ StagingSizes staging_usage() noexcept {
   return {g_verts.size(), g_uniforms.size(), g_indices.size(), g_storage.size()};
 }
 StagingSizes staging_high_water() noexcept { return g_stagingHighWater; }
+#ifdef __EMSCRIPTEN__
+// For the runtime's "?log" report: per-ring high-water bytes since the last call, and splits.
+extern "C" void aurora_web_staging_stats(double* out5) {
+  static uint64_t lastSplits = 0;
+  for (unsigned i = 0; i < 4; ++i) out5[i] = static_cast<double>(g_stagingHighWater[i]);
+  out5[4] = static_cast<double>(g_stagingSplitCount - lastSplits);
+  lastSplits = g_stagingSplitCount;
+  g_stagingHighWater = {};
+}
+#endif
 uint64_t staging_epoch() noexcept { return g_stagingEpoch; }
 uint64_t staging_split_count() noexcept { return g_stagingSplitCount; }
 uint64_t staging_uniform_bytes(uint64_t bytes) {
@@ -1158,10 +1185,10 @@ static bool begin_frame_impl(bool clearEfb, bool capacityResume = false) {
 #endif
     bufferOffset += size;
   };
-  mapBuffer(g_verts, VertexBufferSize);
-  mapBuffer(g_uniforms, UniformBufferSize);
-  mapBuffer(g_indices, IndexBufferSize);
-  mapBuffer(g_storage, StorageBufferSize);
+  mapBuffer(g_verts, StagingVertexSize);
+  mapBuffer(g_uniforms, StagingUniformSize);
+  mapBuffer(g_indices, StagingIndexSize);
+  mapBuffer(g_storage, StagingStorageSize);
   if constexpr (UseTextureBuffer) {
     mapBuffer(g_textureUpload, TextureUploadSize);
   }
@@ -1264,10 +1291,10 @@ static void end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame) {
       }
       shadowOffset += size;
     };
-    upload(g_verts, VertexBufferSize);
-    upload(g_uniforms, UniformBufferSize);
-    upload(g_indices, IndexBufferSize);
-    upload(g_storage, StorageBufferSize);
+    upload(g_verts, StagingVertexSize);
+    upload(g_uniforms, StagingUniformSize);
+    upload(g_indices, StagingIndexSize);
+    upload(g_storage, StagingStorageSize);
     if constexpr (UseTextureBuffer) {
       upload(g_textureUpload, TextureUploadSize);
     }
@@ -1277,10 +1304,10 @@ static void end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame) {
   s_mappingState.reset();
   g_stats.drawCallCount = g_drawCallCount;
   g_stats.mergedDrawCallCount = g_mergedDrawCallCount;
-  g_stats.lastVertSize = writeBuffer(g_verts, g_vertexBuffer, VertexBufferSize, "Vertex");
-  g_stats.lastUniformSize = writeBuffer(g_uniforms, g_uniformBuffer, UniformBufferSize, "Uniform");
-  g_stats.lastIndexSize = writeBuffer(g_indices, g_indexBuffer, IndexBufferSize, "Index");
-  g_stats.lastStorageSize = writeBuffer(g_storage, g_storageBuffer, StorageBufferSize, "Storage");
+  g_stats.lastVertSize = writeBuffer(g_verts, g_vertexBuffer, StagingVertexSize, "Vertex");
+  g_stats.lastUniformSize = writeBuffer(g_uniforms, g_uniformBuffer, StagingUniformSize, "Uniform");
+  g_stats.lastIndexSize = writeBuffer(g_indices, g_indexBuffer, StagingIndexSize, "Index");
+  g_stats.lastStorageSize = writeBuffer(g_storage, g_storageBuffer, StagingStorageSize, "Storage");
   if constexpr (UseTextureBuffer) {
     g_stats.lastTextureUploadSize = g_textureUpload.size();
     {

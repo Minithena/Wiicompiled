@@ -7,6 +7,7 @@
 #ifdef __EMSCRIPTEN__
 #include "platform/web/web_guest_hooks.h"
 #include "platform/web/web_room_launch.h"
+#include "platform/web/web_guest_profile.h"
 #endif
 
 #include <array>
@@ -31,6 +32,9 @@ inline void InvokeIndirectCpu(uint32_t target, CpuContext* ctx);
 // field is always removed, bloom when the user disabled it)
 inline void ApplyRuntimeCallOptions(uint32_t target, CpuContext* ctx) {
 #ifdef __EMSCRIPTEN__
+#if MKW_WEB_GUEST_PROFILE
+    WebGuestProfile::Push(target, ctx);
+#endif
     // Follow section creation/update through the engine's ordinary lifecycle.
     if (target == 0x80634FBCu || target == 0x806224F8u) {
         WebRoomLaunch::BeforeGuestCall(target, ctx);
@@ -66,6 +70,9 @@ MKW_PPC_FORCE_INLINE bool TryHandleRuntimeCall(uint32_t target, CpuContext* ctx)
 // completion hook limited to profile boot.
 MKW_PPC_FORCE_INLINE void CompleteRuntimeCallOptions(uint32_t target, CpuContext* ctx) {
 #ifdef __EMSCRIPTEN__
+#if MKW_WEB_GUEST_PROFILE
+    WebGuestProfile::Pop(target, ctx);
+#endif
     if (target == 0x80634E44u) {
         WebRoomLaunch::AfterGuestCall(target, ctx);
     }
