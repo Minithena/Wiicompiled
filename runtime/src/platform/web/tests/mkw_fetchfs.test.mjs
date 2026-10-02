@@ -752,6 +752,22 @@ test('selected race assets take the next free warmup slot ahead of speculative r
   await tick();
 });
 
+test('a chosen course arrives on the prefetch channel and is fetched; other paths are ignored', async () => {
+  const course = 'DATA/files/Race/Course/castle_course.szs';
+  const { backend, requests, channels } = setup({
+    manifestText: manifest + 'f 12 ' + course + '\nf 12 DATA/files/Scene/UI/Other.szs\n',
+  });
+  await backend.getSize(1);
+  const channel = channels.find(c => c.name === 'mkw-prefetch');
+  channel.onmessage({data: {paths: [course, 'DATA/files/Scene/UI/Other.szs', '../escape.szs']}});
+  await tick();
+  assert.equal(requests.filter(r => r.url.endsWith('/castle_course.szs')).length, 1);
+  assert.ok(!requests.some(r => r.url.endsWith('/Other.szs') || r.url.includes('escape')));
+  channel.onmessage({data: {paths: [course]}});
+  await tick();
+  assert.equal(requests.filter(r => r.url.endsWith('/castle_course.szs')).length, 1);
+});
+
 test('a music stream over 8 MiB is still fetched whole', async () => {
   const mb = 1024 * 1024;
   const { backend, requests } = setup({

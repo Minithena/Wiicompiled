@@ -39,6 +39,24 @@ constexpr uint32_t kKindNames = 0x808B3BE0u;        // 3 pointers (kart / bike)
 constexpr uint32_t kSuffixNames = 0x808B3BECu;      // 3 pointers ("", split-screen)
 constexpr uint32_t kVehicles = 36, kDrivers = 48, kMaxPlayers = 12;
 
+// RaceConfig holds the race in progress at +0x20 and the one being set up in the menus at +0xC10;
+// the menu one is copied over when a race loads. Each keeps its course ID at +0xB48.
+constexpr uint32_t kRaceCourse = 0x20 + 0xB48;   // 2920, as RecordBenchmarkStep reads it
+constexpr uint32_t kMenuCourse = 0xC10 + 0xB48;
+// Course IDs 0x00-0x29 (32 race courses, then 10 battle arenas) and their Race/Course file names.
+constexpr const char* kCourseFiles[] = {
+    "castle_course", "farm_course", "kinoko_course", "volcano_course", "factory_course",
+    "shopping_course", "boardcross_course", "truck_course", "beginner_course", "senior_course",
+    "ridgehighway_course", "treehouse_course", "koopa_course", "rainbow_course", "desert_course",
+    "water_course", "old_peach_gc", "old_mario_gc", "old_waluigi_gc", "old_donkey_gc",
+    "old_falls_ds", "old_desert_ds", "old_garden_ds", "old_town_ds", "old_mario_sfc",
+    "old_obake_sfc", "old_mario_64", "old_sherbet_64", "old_koopa_64", "old_donkey_64",
+    "old_koopa_gba", "old_heyho_gba", "block_battle", "venice_battle", "skate_battle",
+    "casino_battle", "sand_battle", "old_battle4_sfc", "old_battle3_gba", "old_matenro_64",
+    "old_CookieLand_gc", "old_House_ds",
+};
+constexpr uint32_t kCourseCount = sizeof(kCourseFiles) / sizeof(kCourseFiles[0]);
+
 std::string s_lastCourse;
 
 std::string ReadText(uint32_t address) {
@@ -68,6 +86,9 @@ void OnDiscRead(const std::string& path) {
     try {
         const uint32_t scenario = Memory::Read32(kRacedataPointer);
         if (!scenario) return;
+        const uint32_t courseId = Memory::Read32(scenario + kRaceCourse);
+        std::printf("[web-warm] course file %s, scenario course %u (%s)\n", path.c_str() + at + 13, courseId,
+                    courseId < kCourseCount ? kCourseFiles[courseId] : "?");
         const uint32_t count = Memory::Read8(scenario + kPlayerCountOffset);
         if (!count || count > kMaxPlayers) return;
         std::vector<std::string> kinds, suffixes;
@@ -104,6 +125,34 @@ void OnDiscRead(const std::string& path) {
         mkw_web_prefetch_paths(json.c_str());
     } catch (...) {
         // The roster is not readable yet; the game's own reads still work.
+    }
+}
+
+void OnFrame() {
+    static uint32_t seen = UINT32_MAX, posted = UINT32_MAX, stableFrames = 0;
+    static bool booted = false;
+    try {
+        const uint32_t config = Memory::Read32(kRacedataPointer);
+        if (!config) return;
+        const uint32_t course = Memory::Read32(config + kMenuCourse);
+        if (course != seen) {
+            seen = course;
+            stableFrames = 0;
+            return;
+        }
+        if (++stableFrames != 30) return;
+        if (!booted) {
+            // The value present at boot is a default, not a choice.
+            booted = true;
+            posted = course;
+            return;
+        }
+        if (course == posted || course >= kCourseCount) return;
+        posted = course;
+        std::printf("[web-warm] course %u (%s) chosen: fetching it before the race loads\n", course, kCourseFiles[course]);
+        const std::string json = std::string("[\"DATA/files/Race/Course/") + kCourseFiles[course] + ".szs\"]";
+        mkw_web_prefetch_paths(json.c_str());
+    } catch (...) {
     }
 }
 

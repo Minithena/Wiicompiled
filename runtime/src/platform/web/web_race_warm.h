@@ -13,5 +13,10 @@ namespace WebRaceWarm {
 // Called for every disc read with the file's path; acts on the first read of each course.
 void OnDiscRead(const std::string& path);
 
+// Called once per presented frame. The course is chosen (cup or course select, or the online vote)
+// several seconds before the race loads it, so a new choice that stays put for half a second starts
+// the course download right away instead of costing a round trip on the loading screen.
+void OnFrame();
+
 } // namespace WebRaceWarm
 #endif

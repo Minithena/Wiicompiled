@@ -4,6 +4,7 @@
 #include "settings_overlay.h"
 #include "platform/web/web_guest_hooks.h"
 #include "platform/web/web_performance.h"
+#include "platform/web/web_race_warm.h"
 
 #include <dolphin/gx/GXAurora.h>
 
@@ -120,6 +121,7 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
     if (WebGuestHooks::ConsumeSkippedFrame()) {
         return;
     }
+    WebRaceWarm::OnFrame();
     const bool measure = WebPerformance::Enabled() || WebPerformance::BenchmarkEnabled();
     static double previousStart = 0.0, previousEnd = 0.0;
     const double start = measure ? WebPerformance::Now() : 0.0;

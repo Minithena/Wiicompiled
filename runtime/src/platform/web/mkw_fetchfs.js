@@ -299,11 +299,11 @@ addToLibrary({
         }
         let started = 0;
         for (const path of paths.slice(0, 96)) {
-          if (typeof path !== 'string' || !/^DATA\/files\/Race\/Kart\/[A-Za-z0-9_.-]+\.szs$/.test(path)) continue;
+          if (typeof path !== 'string' || !/^DATA\/files\/Race\/(Kart|Course)\/[A-Za-z0-9_.-]+\.szs$/.test(path)) continue;
           const target = lowerKeys.get(('/game/' + path).toLowerCase());
           if (warmFile(target, sizes, chunkSize, true)) started++;
         }
-        console.error('[web-fetch] race prefetch: ' + started + ' of ' + paths.length + ' kart archives on the disc');
+        console.error('[web-fetch] race prefetch: ' + started + ' of ' + paths.length + ' race archives on the disc');
       };
     }
 
