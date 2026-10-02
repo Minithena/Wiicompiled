@@ -37,6 +37,9 @@ const MemoryInline::SparseWritablePageTable*
 uint8_t MemoryInline::g_deferredReadCoveredPages[MemoryInline::kPageCount]{};
 template <typename T>
 T MemoryInline::ReadResolvedFallback(uint32_t addr) {
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+    ++g_webSlowPathCounts[3];
+#endif
     if constexpr (sizeof(T) == 1) return Memory::Read8(addr);
     if constexpr (sizeof(T) == 2) return Memory::Read16(addr);
     if constexpr (sizeof(T) == 4) return Memory::Read32(addr);
@@ -50,6 +53,9 @@ float MemoryInline::ReadResolvedFallbackFloat32(uint32_t addr) { return Memory::
 double MemoryInline::ReadResolvedFallbackFloat64(uint32_t addr) { return Memory::ReadFloat64(addr); }
 template <typename T>
 void MemoryInline::WriteResolvedFallback(uint32_t addr, T value) {
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+    ++g_webSlowPathCounts[3];
+#endif
     if constexpr (sizeof(T) == 1) Memory::Write8(addr, value);
     else if constexpr (sizeof(T) == 2) Memory::Write16(addr, value);
     else if constexpr (sizeof(T) == 4) Memory::Write32(addr, value);
@@ -626,6 +632,9 @@ namespace {
 } // namespace
 
 uint8_t MemoryInline::Read8Slow(uint32_t addr) {
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+    ++g_webSlowPathCounts[1];
+#endif
     if (IsMmioAddress(addr)) {
         ThrowMmioReadBlocked(addr, sizeof(uint8_t));
     }
@@ -634,6 +643,9 @@ uint8_t MemoryInline::Read8Slow(uint32_t addr) {
 }
 
 uint16_t MemoryInline::Read16Slow(uint32_t addr) {
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+    ++g_webSlowPathCounts[1];
+#endif
     if (IsMmioAddress(addr)) {
         ThrowMmioReadBlocked(addr, sizeof(uint16_t));
     }
@@ -642,6 +654,9 @@ uint16_t MemoryInline::Read16Slow(uint32_t addr) {
 }
 
 uint32_t MemoryInline::Read32Slow(uint32_t addr) {
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+    ++g_webSlowPathCounts[1];
+#endif
     if (IsMmioAddress(addr)) {
         ThrowMmioReadBlocked(addr, sizeof(uint32_t));
     }
@@ -651,6 +666,9 @@ uint32_t MemoryInline::Read32Slow(uint32_t addr) {
 }
 
 uint64_t MemoryInline::Read64Slow(uint32_t addr) {
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+    ++g_webSlowPathCounts[1];
+#endif
     if (IsMmioAddress(addr)) {
         ThrowMmioReadBlocked(addr, sizeof(uint64_t));
     }
@@ -659,6 +677,9 @@ uint64_t MemoryInline::Read64Slow(uint32_t addr) {
 }
 
 float MemoryInline::ReadFloat32Slow(uint32_t addr) {
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+    ++g_webSlowPathCounts[1];
+#endif
     if (IsMmioAddress(addr)) {
         ThrowMmioReadBlocked(addr, sizeof(float));
     }
@@ -670,6 +691,9 @@ float MemoryInline::ReadFloat32Slow(uint32_t addr) {
 }
 
 double MemoryInline::ReadFloat64Slow(uint32_t addr) {
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+    ++g_webSlowPathCounts[1];
+#endif
     if (IsMmioAddress(addr)) {
         ThrowMmioReadBlocked(addr, sizeof(double));
     }
@@ -681,6 +705,9 @@ double MemoryInline::ReadFloat64Slow(uint32_t addr) {
 }
 
 void MemoryInline::Write8Slow(uint32_t addr, uint8_t val) {
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+    ++g_webSlowPathCounts[2];
+#endif
     if (IsGpuFifoAddress(addr)) {
         GX_HLE_FIFO_Write8(val);
         return;
@@ -692,6 +719,9 @@ void MemoryInline::Write8Slow(uint32_t addr, uint8_t val) {
 }
 
 void MemoryInline::Write16Slow(uint32_t addr, uint16_t val) {
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+    ++g_webSlowPathCounts[2];
+#endif
     if (IsGpuFifoAddress(addr)) {
         GX_HLE_FIFO_Write16(val);
         return;
@@ -703,6 +733,9 @@ void MemoryInline::Write16Slow(uint32_t addr, uint16_t val) {
 }
 
 void MemoryInline::Write32Slow(uint32_t addr, uint32_t val) {
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+    ++g_webSlowPathCounts[2];
+#endif
     if (IsGpuFifoAddress(addr)) {
         GX_HLE_FIFO_Write32(val);
         return;
@@ -714,6 +747,9 @@ void MemoryInline::Write32Slow(uint32_t addr, uint32_t val) {
 }
 
 void MemoryInline::Write64Slow(uint32_t addr, uint64_t val) {
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+    ++g_webSlowPathCounts[2];
+#endif
     if (IsGpuFifoAddress(addr)) {
         // The gather pipe is a byte-stream FIFO; a 64-bit store is two big-endian
         // 32-bit pushes, high word first. Without this arm the write fell through
@@ -730,6 +766,9 @@ void MemoryInline::Write64Slow(uint32_t addr, uint64_t val) {
 }
 
 void MemoryInline::WriteFloat32Slow(uint32_t addr, double val) {
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+    ++g_webSlowPathCounts[2];
+#endif
     // stfs stores the IEEE-754 bit pattern of the single-precision value, never a
     // truncated integer.
     const uint32_t bits = ConvertPpcDoubleToSingleBits(val);
@@ -745,6 +784,9 @@ void MemoryInline::WriteFloat32Slow(uint32_t addr, double val) {
 }
 
 void MemoryInline::WriteFloat64Slow(uint32_t addr, double val) {
+#if defined(MKW_GUEST_FLAT_NO_VIEW)
+    ++g_webSlowPathCounts[2];
+#endif
     // stfd stores the full 64-bit FPR bit pattern - load-bearing for the
     // fctiwz->stfd->lwz idiom, where the integer result lives in the low word.
     uint64_t bits;

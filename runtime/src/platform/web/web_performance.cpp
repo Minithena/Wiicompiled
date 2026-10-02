@@ -2,6 +2,7 @@
 #include "web_performance.h"
 #include "runtime_config.h"
 #include "memory.h"
+#include "memory_access.h"
 
 #include <algorithm>
 #include <array>
@@ -218,6 +219,10 @@ void Report(double elapsed) noexcept {
                 totals[0] / count - sleepMs / count - waitMs / count - mapWaitMs / count - yieldMs / count);
     double staging[5];
     aurora_web_staging_stats(staging);
+    uint32_t* slow = MemoryInline::g_webSlowPathCounts;
+    std::printf("[web-perf] memory slow paths per frame: sparse-store=%.0f slow-read=%.0f slow-write=%.0f range-fallback=%.0f\n",
+                double(slow[0]) / count, double(slow[1]) / count, double(slow[2]) / count, double(slow[3]) / count);
+    slow[0] = slow[1] = slow[2] = slow[3] = 0;
     std::printf("[web-perf] staging high water KiB vert/uniform/index/storage=%.0f/%.0f/%.0f/%.0f splits=%.0f\n",
                 staging[0] / 1024, staging[1] / 1024, staging[2] / 1024, staging[3] / 1024, staging[4]);
 }

@@ -391,11 +391,16 @@ MKW_MEMORY_FORCE_INLINE bool TryReadGuestScalar(uint32_t address, T& outValue) {
 }
 
 #if defined(MKW_GUEST_FLAT_NO_VIEW)
+// "?log" counters for the out-of-line memory paths, printed per frame by web_performance.cpp:
+// [0] sparse sub-page stores, [1] Read*Slow, [2] Write*Slow, [3] resolved-range fallbacks.
+inline uint32_t g_webSlowPathCounts[4] = {};
+
 // WebAssembly routes every translated store through TryWriteGuestScalar, so inlining the sparse
 // sub-page tier at each of ~300k store sites cost megabytes of code for a case only pages that
 // mix .text and data reach. Keep it one call away instead of on the cold slow path.
 template <typename T>
 MKW_MEMORY_NO_INLINE bool TryWriteSparseGuestScalar(uint32_t address, T value) {
+    ++g_webSlowPathCounts[0];
     uint8_t* ptr = nullptr;
     if (!TryGetWritablePointerFast(address, sizeof(T), ptr)) return false;
     if constexpr (sizeof(T) == 1) {
