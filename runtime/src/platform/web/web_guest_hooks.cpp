@@ -21,11 +21,9 @@ constexpr uint32_t kProcessLagFrames = 0x80654B00u;  // RKNet::PacketMgr::Proces
 
 constexpr int32_t kMaxSkipStreak = 5;  // at least every sixth iteration is drawn (10 frames a second)
 constexpr int32_t kForgiveLag = 6;     // further behind than this is a stall, not slowness
-constexpr int32_t kForgiveLagOnline = 600;  // online: catch up after stalls of up to 10 s
 
 bool s_catchup = false;
 bool s_noLagWait = true;
-bool s_onlineRace = false;      // ProcessLagFrames has run in this race: other players are racing too
 std::atomic<uint32_t> s_lagCalls{0};
 bool s_raceCalc = false;        // RaceScene::OnCalc ran in this iteration
 bool s_decided = false;         // the draw of this iteration has been decided
@@ -93,19 +91,19 @@ bool DecideSkip() {
         s_idleSleepMs = 0.0;
         s_drawBusy = s_skipBusy = 0.0;
         s_divider = s_pendingDivider = 1;
-        s_onlineRace = false;
         return false;
     }
     s_raceCalc = false;
     s_thisRace = true;
     ++s_steps;
     ++s_raceSteps;
+    const bool ahead = s_idleSleepMs >= 3.0;
     const double dt = now - s_lastDecision;
     if (s_trace) {
         static int printed = 0;
         if (printed < 240 && (printed++ % 1) == 0) {
             std::printf("[web-pace-trace] step=%d dt=%.1f idle=%.1f lag=%.2f%s div=%d\n", s_steps, dt, s_idleSleepMs,
-                        (now - s_baseTime) / period - s_steps, s_idleSleepMs >= 3.0 ? " SLEPT" : "", s_divider);
+                        (now - s_baseTime) / period - s_steps, ahead ? " AHEAD" : "", s_divider);
         }
     }
     // The iteration that just ended was a skipped one or a drawn one; its work was dt minus sleeping.
@@ -118,25 +116,22 @@ bool DecideSkip() {
     s_idleSleepMs = 0.0;
     if (s_steps % kEvaluateEvery == 0) UpdateDivider(period);
 
-    // How far the race is behind the wall clock, in whole steps. Sleeping does not prove the game
-    // is on time: after a frame overruns its retrace, VIWaitForRetrace sleeps until the following
-    // one, so a machine that is slightly too slow sleeps every iteration and still loses a step
-    // each time (53-56 steps/s on a 143 Hz Windows player, 2026-10-07). Only the clock decides;
-    // being early re-anchors the timeline (absorbing drift between this clock and the VI's).
-    double behind = (now - s_baseTime) / period - s_steps;
-    if (behind < 0.0) {
+    int32_t lag;
+    if (ahead) {
+        // The game had time to sleep this iteration, so it has headroom and owes nothing (this
+        // also absorbs any drift between our clock and the VI's). Real lag never sleeps: the
+        // retraces it waits for are already due.
         s_baseTime = now - s_steps * period;
-        behind = 0.0;
-    }
-    const int32_t lag = static_cast<int32_t>(behind);
-    if (lag > s_maxLag.load(std::memory_order_relaxed)) s_maxLag.store(lag, std::memory_order_relaxed);
-    // A long stall is forgiven offline (catching up would only fast-forward the scene), but online
-    // the other players kept racing, so the race catches up to them instead.
-    if (lag > (s_onlineRace ? kForgiveLagOnline : kForgiveLag)) {
-        s_baseTime = now - s_steps * period;
-        s_streak = 0;
-        ++s_forgiven;
-        return false;
+        lag = 0;
+    } else {
+        lag = static_cast<int32_t>((now - s_baseTime) / period) - s_steps;
+        if (lag > s_maxLag.load(std::memory_order_relaxed)) s_maxLag.store(lag, std::memory_order_relaxed);
+        if (lag > kForgiveLag) {
+            s_baseTime = now - s_steps * period;
+            s_streak = 0;
+            ++s_forgiven;
+            return false;
+        }
     }
 
     bool skip;
@@ -144,7 +139,7 @@ bool DecideSkip() {
         skip = (s_steps % s_divider) != 0;
         s_streak = 0;
     } else {
-        skip = lag >= 1 && s_streak < kMaxSkipStreak;
+        skip = !ahead && lag >= 1 && s_streak < kMaxSkipStreak;
         s_streak = skip ? s_streak + 1 : 0;
     }
     if (skip) {
@@ -177,7 +172,6 @@ bool Handle(uint32_t target, CpuContext*) {
     if (target == kProcessLagFrames) {
         WebPerformance::RecordBenchmarkOnlineCheck();
         s_lagCalls.fetch_add(1, std::memory_order_relaxed);
-        s_onlineRace = true;
         return s_noLagWait;
     }
     // Measure the simulation even with catch-up disabled; otherwise a slow-motion baseline
