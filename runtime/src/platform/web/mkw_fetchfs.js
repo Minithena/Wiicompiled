@@ -285,8 +285,9 @@ addToLibrary({
     }
 
     // The game thread posts the disc paths a race is about to read (web_race_warm.cpp): one kart
-    // archive per player, which the game otherwise reads one after another, a round trip each.
-    // Only names that exist on the disc are fetched, whole, in bounded priority batches.
+    // archive per player, which the game otherwise reads one after another, a round trip each, and
+    // the chosen course with its music. Only names that exist on the disc are fetched, whole, in
+    // bounded priority batches.
     function listenForPrefetch(sizes, chunkSize) {
       if (prefetchChannel || typeof BroadcastChannel === 'undefined') return;
       prefetchChannel = new BroadcastChannel('mkw-prefetch');
@@ -299,11 +300,12 @@ addToLibrary({
         }
         let started = 0;
         for (const path of paths.slice(0, 96)) {
-          if (typeof path !== 'string' || !/^DATA\/files\/Race\/(Kart|Course)\/[A-Za-z0-9_.-]+\.szs$/.test(path)) continue;
+          if (typeof path !== 'string' || !(/^DATA\/files\/Race\/(Kart|Course)\/[A-Za-z0-9_.-]+\.szs$/.test(path) ||
+              /^DATA\/files\/sound\/strm\/[A-Za-z0-9_-]+\.brstm$/.test(path))) continue;
           const target = lowerKeys.get(('/game/' + path).toLowerCase());
           if (warmFile(target, sizes, chunkSize, true)) started++;
         }
-        console.error('[web-fetch] race prefetch: ' + started + ' of ' + paths.length + ' race archives on the disc');
+        console.error('[web-fetch] race prefetch: ' + started + ' of ' + paths.length + ' race files on the disc');
       };
     }
 

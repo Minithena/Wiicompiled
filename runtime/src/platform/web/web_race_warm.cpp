@@ -56,6 +56,21 @@ constexpr const char* kCourseFiles[] = {
     "old_CookieLand_gc", "old_House_ds",
 };
 constexpr uint32_t kCourseCount = sizeof(kCourseFiles) / sizeof(kCourseFiles[0]);
+// Each course's music stream in sound/strm, without its "_n"/"_f" (normal / final lap) ending; the
+// same order as kCourseFiles. A race opens the stream as it starts: an uncached read took 1.5 s on
+// a player's machine (2026-10-07 log) and froze the game at the start line.
+constexpr const char* kCourseMusic[] = {
+    "n_Circuit32", "n_Farm", "n_Kinoko", "n_Volcano32", "STRM_N_FACTORY",
+    "n_Shopping32", "n_Snowboard32", "STRM_N_TRUCK", "n_Circuit32", "n_Daisy32",
+    "STRM_N_RIDGEHIGHWAY", "n_maple", "STRM_N_KOOPA", "n_Rainbow32", "STRM_N_DESERT",
+    "STRM_N_WATER", "r_GC_Beach32", "r_GC_Circuit32", "r_GC_Stadium32", "r_GC_Mountain32",
+    "r_DS_Jungle32", "r_DS_Desert32", "r_DS_Garden32", "r_DS_Town32", "r_SFC_Circuit32",
+    "r_SFC_Obake32", "r_64_Circuit32", "r_64_Sherbet32", "r_64_Kuppa32", "r_64_Jungle32",
+    "r_AGB_Kuppa32", "r_AGB_Beach32", "n_block", "n_venice", "n_skate",
+    "n_casino", "n_ryuusa", "r_sfc_battle", "r_agb_battle", "r_64_battle",
+    "r_GC_Battle32", "r_ds_battle",
+};
+static_assert(sizeof(kCourseMusic) / sizeof(kCourseMusic[0]) == kCourseCount, "one music stream per course");
 
 std::string s_lastCourse;
 
@@ -150,7 +165,10 @@ void OnFrame() {
         if (course == posted || course >= kCourseCount) return;
         posted = course;
         std::printf("[web-warm] course %u (%s) chosen: fetching it before the race loads\n", course, kCourseFiles[course]);
-        const std::string json = std::string("[\"DATA/files/Race/Course/") + kCourseFiles[course] + ".szs\"]";
+        // The fetcher matches names without regard to case and fetches the final-lap "_f" stream once
+        // the "_n" one is read; leaving it out keeps a fetch slot free for the kart archives.
+        const std::string json = std::string("[\"DATA/files/Race/Course/") + kCourseFiles[course] +
+                                 ".szs\",\"DATA/files/sound/strm/" + kCourseMusic[course] + "_n.brstm\"]";
         mkw_web_prefetch_paths(json.c_str());
     } catch (...) {
     }

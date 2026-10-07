@@ -151,6 +151,44 @@ uint32_t g_nextConn = 1;
 VSocket g_sockets[kMaxSockets];
 std::vector<std::vector<uint8_t>> g_outbox;
 
+// Diagnostics for "Save log": when another player goes quiet, when this game stops servicing the
+// network (a long frame, a stalled read), and roster changes. Each line is printed once per event.
+struct PeerSeen {
+    uint32_t ip = 0;
+    double last = 0.0;   // ms, emscripten_get_now()
+    bool quiet = false;  // reported as quiet, not yet back
+};
+PeerSeen g_peers[16];
+double g_lastPump = 0.0;
+int g_rosterSize = -1;
+constexpr double kQuietMs = 1500.0;
+
+void NotePeer(uint32_t ip) {
+    const double now = emscripten_get_now();
+    PeerSeen* slot = nullptr;
+    for (PeerSeen& p : g_peers) {
+        if (p.ip == ip) { slot = &p; break; }
+        if (!slot && p.ip == 0) slot = &p;
+    }
+    if (!slot) return;
+    if (slot->ip == ip && slot->quiet) {
+        std::printf("[web-net] %u.%u.%u.%u back after %.0f ms of silence\n", ip >> 24, ip >> 16 & 255, ip >> 8 & 255,
+                    ip & 255, now - slot->last);
+    }
+    slot->ip = ip;
+    slot->last = now;
+    slot->quiet = false;
+}
+
+void CheckQuietPeers(double now) {
+    for (PeerSeen& p : g_peers) {
+        if (!p.ip || p.quiet || now - p.last < kQuietMs) continue;
+        p.quiet = true;
+        std::printf("[web-net] nothing from %u.%u.%u.%u for %.0f ms\n", p.ip >> 24, p.ip >> 16 & 255, p.ip >> 8 & 255,
+                    p.ip & 255, now - p.last);
+    }
+}
+
 void Put16(std::vector<uint8_t>& out, uint16_t v) {
     out.push_back(static_cast<uint8_t>(v >> 8));
     out.push_back(static_cast<uint8_t>(v));
@@ -211,6 +249,13 @@ void Deliver(const uint8_t* msg, size_t size) {
         break;
     case 0x85:
         if (size > 1 && size <= 4096) {
+            // Count the players in the roster JSON ("id" once per player) to log joins and leaves.
+            int players = 0;
+            for (size_t i = 1; i + 4 < size; ++i) players += std::memcmp(msg + i, "\"id\":", 5) == 0;
+            if (players != g_rosterSize) {
+                std::printf("[web-net] room now has %d player(s) connected to the relay\n", players);
+                g_rosterSize = players;
+            }
             MAIN_THREAD_EM_ASM({
                 if (!window.mkwRoomToken && window.mkwSetRoomPlayers) {
                     window.mkwSetRoomPlayers(UTF8ToString($0, $1), $2 >>> 0);
@@ -220,6 +265,7 @@ void Deliver(const uint8_t* msg, size_t size) {
         break;
     case 0x81: {
         if (size < 9) return;
+        if (Get32(msg + 1) != WebVnet::kServerIp) NotePeer(Get32(msg + 1));
         const uint16_t dstPort = Get16(msg + 7);
         for (VSocket& s : g_sockets) {
             if (s.used && s.type == SOCK_DGRAM && s.localPort == dstPort) {
@@ -273,6 +319,12 @@ void Start() {
 void PumpNow() {
     Start();
     if (g_url.empty()) return;
+    const double now = emscripten_get_now();
+    if (g_lastPump != 0.0 && now - g_lastPump > 1000.0 && g_localIp) {
+        std::printf("[web-net] the game did not service the network for %.0f ms (frame or read stall)\n",
+                    now - g_lastPump);
+    }
+    g_lastPump = now;
     if (vnet_js_status() == 1) {
         if (g_nameDirty.exchange(false, std::memory_order_relaxed)) {
             char name[129]{};
@@ -299,6 +351,7 @@ void PumpNow() {
         Deliver(buffer.data(), static_cast<size_t>(size));
         deliveredBytes += static_cast<size_t>(size);
     }
+    CheckQuietPeers(emscripten_get_now());
     if (vnet_js_status() == 3 && !g_disconnected) {
         g_disconnected = true;
         MAIN_THREAD_EM_ASM({ if (window.mkwSetGameConnection) window.mkwSetGameConnection('disconnected'); });
